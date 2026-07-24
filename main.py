@@ -102,7 +102,7 @@ axes[1,1].set_ylabel('Churnn rate %')
 
 # chur by paymenbt 
 payment_churn= df.groupby(
-    'PaymentMethod')['Churn_Binary'].mean()*100
+    'Payment Method')['Churn_Binary'].mean()*100
 axes[1,2].bar(payment_churn.index,
               payment_churn.values,
               color='steelblue')
