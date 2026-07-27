@@ -49,7 +49,7 @@ def _guess_target_column(df: pd.DataFrame) -> str | None:
 
 def analyze_dataset(df: pd.DataFrame) -> dict:
     """
-    Automatically profile a dataframe. No manual df.info() needed.
+    aut profile a dataframe. manulaly is not  df.info() needed.
     Returns a dict that's directly JSON-serializable for the API response.
     """
     n_rows, n_cols = df.shape
