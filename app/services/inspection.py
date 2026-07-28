@@ -26,7 +26,7 @@ def _guess_datetime_columns(df: pd.DataFrame) -> list[str]:
 
 def _guess_target_column(df: pd.DataFrame) -> str | None:
     """
-    Heuristic target detector. Looks for common target-like names first,
+    Heuristic target detector.  just Looks for common target-like names first,
     falls back to the last low-cardinality categorical/binary column.
     """
     common_names = [
