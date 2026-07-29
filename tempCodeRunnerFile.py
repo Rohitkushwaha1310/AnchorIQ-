@@ -1,1 +1,0 @@
-print(f"Columns        : {df.columns.tolist()}")
