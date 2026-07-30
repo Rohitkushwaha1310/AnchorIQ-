@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
 
 df= pd.read_csv("telco_churn.csv")
 
@@ -131,3 +133,54 @@ plt.tight_layout()
 plt.savefig('feature_analysis.png', dpi=150, bbox_inches='tight')
 plt.show()
 print("✅ Charts saved!")
+
+
+print ( " preparinng data for ml")
+original_features = [
+     'tenure', 'MonthlyCharges', 'TotalCharges',
+    'SeniorCitizen', 'Partner', 'Dependents',
+    'PhoneService', 'MultipleLines',
+    'InternetService', 'OnlineSecurity',
+    'OnlineBackup', 'DeviceProtection',
+    'TechSupport', 'StreamingTV', 'StreamingMovies',
+    'Contract', 'PaperlessBilling', 'PaymentMethod'
+]
+
+
+engineered_features = [
+    'ChargesPerTenure', 'Isnewcustomer',
+    'ServiceCount', 'Ishighvalue',
+    'ContractRisk', 'Isautopay'
+]
+
+
+all_features  = original_features + engineered_features
+target = 'Churn_Binary'
+
+df_ml = df[all_features+ [target]].copy()
+cat_cols = df_ml.select_dtypes(include='object').columns.tolist()
+print(f"encoding{len(cat_cols)} categorical columns: ")
+
+df_ml = pd.get_dummies(df_ml,
+                        columns= cat_cols,
+                        drop_first=True)
+
+
+print(f"\nShape after encoding : {df_ml.shape}")
+print(f"Total features       : {df_ml.shape[1]-1}")
+
+
+X = df_ml.drop(target, axis=1)
+y = df_ml[target]
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2,
+    random_state=42,
+    stratify=y)  # stratify keeps churn ratio same!
+
+print(f"\nTraining samples : {X_train.shape[0]}")
+print(f"Testing samples  : {X_test.shape[0]}")
+print(f"Churn in train   : {y_train.mean()*100:.1f}%")
+print(f"Churn in test    : {y_test.mean()*100:.1f}%")
+
+print("\n✅ Data ready for modeling!")
