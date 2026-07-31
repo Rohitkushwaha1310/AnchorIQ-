@@ -266,6 +266,6 @@ for name, (pred, proba) in models.items():
 
 
 best_model_name = max(results, key=lambda x: results[x]['AUC'])
-print(f"\n🏆 Best Model: {best_model_name}")
+print(f"\n Best Model of all that i tried so far : {best_model_name}")
 print(f"   AUC Score : {results[best_model_name]['AUC']:.4f}")    
 
