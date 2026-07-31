@@ -4,6 +4,16 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import (accuracy_score, classification_report,
+                              confusion_matrix, roc_auc_score,
+                              f1_score, precision_score, recall_score)
+from xgboost import XGBClassifier
+import warnings
+warnings.filterwarnings('ignore')
 
 df= pd.read_csv("telco_churn.csv")
 
@@ -184,3 +194,78 @@ print(f"Churn in train   : {y_train.mean()*100:.1f}%")
 print(f"Churn in test    : {y_test.mean()*100:.1f}%")
 
 print("\n✅ Data ready for modeling!")
+
+
+print("buildinng churn prediction model")
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+
+#mdoel 1 logistic regression 
+print("training loigtstic regresssion")
+lr= LogisticRegression(max_iter = 1000, random_state=42)
+lr.fit(X_train_scaled, y_train)
+lr_pred = lr.predict(X_test_scaled)
+lr_proba = lr.predict_proba(X_test_scaled)[:,1]
+
+
+#model 2 random forestation 
+
+print("ranndom foreststation")
+
+rf= RandomForestClassifier(
+    n_estimators = 1000,
+    random_state= 42,
+    n_jobs=-1
+)
+
+rf.fit(X_train, y_train)
+rf_pred = rf.predict(X_test)
+rf_proba = rf.predict_proba(X_test)[:,1]
+
+#model 3 xgboost
+
+print("training XGboost")
+xgb = XGBClassifier(
+    n_estimators=100,
+    learning_rate= 0.1,
+    max_depth = 5,
+    random_state= 42,
+    eval_metric='logloss',
+    verbosity=0
+)
+
+xgb.fit(X_train, y_train)
+xgb_pred= xgb.predict(X_test)
+xgb_proba = xgb.predict_proba(X_test)[:,1]
+
+
+print("camparision of all models")
+print(f"{'Model':<25} {'Accuracy':>10} {'AUC':>8} {'F1':>8} {'Recall':>8}")
+print("="*60)
+
+
+
+models = {
+    'Logistic Regression': (lr_pred, lr_proba),
+    'Random Forest'      : (rf_pred, rf_proba),
+    'XGBoost'            : (xgb_pred, xgb_proba)
+}
+
+
+results = {}
+for name, (pred, proba) in models.items():
+    acc = accuracy_score(y_test, pred)*100
+    auc = roc_auc_score(y_test, proba)
+    f1 = f1_score(y_test, pred)
+    rec = recall_score(y_test, pred)
+    results[name] = {'Accuracy':acc, 'AUC': auc, 'F1':f1, 'Recall': rec}
+    print(f"{name:<25} {acc:>10.2f}% {auc:>8.4f} {f1:>8.4f} {rec:>8.4f}")
+
+
+best_model_name = max(results, key=lambda x: results[x]['AUC'])
+print(f"\n🏆 Best Model: {best_model_name}")
+print(f"   AUC Score : {results[best_model_name]['AUC']:.4f}")    
+
