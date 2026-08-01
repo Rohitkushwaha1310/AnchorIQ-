@@ -13,6 +13,8 @@ from sklearn.metrics import (accuracy_score, classification_report,
                               f1_score, precision_score, recall_score)
 from xgboost import XGBClassifier
 import warnings
+from sklearn.metrics import roc_curve, auc
+from sklearn.model_selection import cross_val_score
 warnings.filterwarnings('ignore')
 
 df= pd.read_csv("telco_churn.csv")
@@ -269,3 +271,18 @@ best_model_name = max(results, key=lambda x: results[x]['AUC'])
 print(f"\n Best Model of all that i tried so far : {best_model_name}")
 print(f"   AUC Score : {results[best_model_name]['AUC']:.4f}")    
 
+
+print("deep evaluation - logistsi regression")
+
+print('classification report')
+print(classification_report(y_test, lr_pred,
+                target_names = ['Stayed', 'Churned']))
+
+cm= confusion_matrix(y_test, lr_pred)
+tn, fp, fn, tp = cm.ravel()
+
+print(" confusion matrix")
+print(f"True Negatives  (Stayed correctly)  : {tn}")
+print(f"False Positives (Wrong churn flag)   : {fp}")
+print(f"False Negatives (Missed churners!)   : {fn}")
+print(f"True Positives  (Caught churners!)   : {tp}")
