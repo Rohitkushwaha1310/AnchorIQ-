@@ -286,3 +286,18 @@ print(f"True Negatives  (Stayed correctly)  : {tn}")
 print(f"False Positives (Wrong churn flag)   : {fp}")
 print(f"False Negatives (Missed churners!)   : {fn}")
 print(f"True Positives  (Caught churners!)   : {tp}")
+
+
+# bussiness costs
+cost_fn = 500
+cost_fp =  50
+total_cost = (fn* cost_fn)+ (fp* cost_fp)
+cost_saved = tp*500*0.3
+
+
+print(f" BUSINESS IMPACT")
+print(f"Churners caught      : {tp}")
+print(f"Churners missed      : {fn}")
+print(f"Cost of missed       : ${fn*cost_fn:,}")
+print(f"Cost of false alarms : ${fp*cost_fp:,}")
+print(f"Total cost           : ${total_cost:,}")
