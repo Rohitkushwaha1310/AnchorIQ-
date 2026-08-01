@@ -301,3 +301,63 @@ print(f"Churners missed      : {fn}")
 print(f"Cost of missed       : ${fn*cost_fn:,}")
 print(f"Cost of false alarms : ${fp*cost_fp:,}")
 print(f"Total cost           : ${total_cost:,}")
+print(f"Est. revenue saved   : ${cost_saved:,.0f}")
+
+# cross validation 
+print( " 5 fold cross validation")
+
+cv_scores = cross_val_score(
+    lr, X_train_scaled, y_train, cv=5, scoring='roc_auc'
+)
+print(f"CV AUC Scores : {cv_scores.round(4)}")
+print(f"Mean AUC      : {cv_scores.mean():.4f}")
+print(f"Std Dev       : {cv_scores.std():.4f}")
+
+#visaulization
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+fig.suptitle('AnchorIQ — Model Evaluation', fontsize=16)
+
+#heatmap of confusion matrix
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+            xticklabels=['Stayed','Churned'],
+            yticklabels=['Stayed','Churned'],
+            ax=axes[0])
+axes[0].set_title('Confusion Matrix')
+axes[0].set_ylabel('Actual')
+axes[0].set_xlabel('Predicted')
+
+
+# roc curve of all three models
+for name, (pred, proba), color in zip(
+    ['Logistic Reg','Random Forest','XGBoost'],
+    [(lr_pred, lr_proba),(rf_pred, rf_proba),(xgb_pred, xgb_proba)],
+    ['blue','green','red']):
+    fpr, tpr, _ = roc_curve(y_test, proba)
+    auc_score = roc_auc_score(y_test, proba)
+    axes[1].plot(fpr, tpr, color=color,
+                 label=f'{name} (AUC={auc_score:.3f})')
+axes[1].plot([0,1],[0,1],'k--', label='Random')
+axes[1].set_title('ROC Curve — All Models')
+axes[1].set_xlabel('False Positive Rate')
+axes[1].set_ylabel('True Positive Rate')
+axes[1].legend()
+
+
+#cv score
+axes[2].bar(range(1,6), cv_scores,
+            color='steelblue', edgecolor='white')
+axes[2].axhline(cv_scores.mean(), color='red',
+                linestyle='--',
+                label=f'Mean={cv_scores.mean():.3f}')
+axes[2].set_title('Cross Validation AUC Scores')
+axes[2].set_xlabel('Fold')
+axes[2].set_ylabel('AUC Score')
+axes[2].legend()
+axes[2].set_ylim(0.7, 1.0)
+
+plt.tight_layout()
+plt.savefig('model_evaluation.png', dpi=150, bbox_inches='tight')
+plt.show()
+print("✅ Evaluation charts saved!")
+
+#thresold tuning
