@@ -528,8 +528,15 @@ pred_df.to_csv('reports/predictions.csv', index=False)
 print("\n✅ Predictions saved!")
 print("\n🏆 churn_model.py COMPLETE!")
 
+df['Churn_Probability']= lr.predict_proba(scaler.transform(df_ml.drop('Churn_Binary', axis=1)))[:,1]
 
-    
+df['Churn_Prediction'] = (
+    df['Churn_Probability'] >= best_thresh
+).astype(int)
 
+df['Risk_Level']= (df['Churn_Probability']>= best_thresh ).astype(int)
 
-    
+df.to_csv('reports/churn_with_predictions.csv',
+          index=False)
+print("✅ Data exported for Power BI!")
+print(f"Risk distribution:\n{df['Risk_Level'].value_counts()}")
