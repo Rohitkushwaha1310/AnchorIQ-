@@ -475,7 +475,7 @@ print(f"MOdel saved size : {size:.2f} KB")
 #load and verify
 loaded= joblib.load('models/churn_model.pkl')
 model_loaded = loaded['model']
-scaler_loaded - loaded['scaler']
+scaler_loaded = loaded['scaler']
 threshold_loaded = loaded['threshold']
 features_loaded = loaded['features']
 
@@ -483,6 +483,50 @@ print(f"loaded  and verify ")
 print(f"   Threshold : {threshold_loaded}")
 print(f"   AUC       : {loaded['auc']:.4f}")
 print(f"   Features  : {len(features_loaded)}")
+
+#predict new customer
+
+#simulate f5 customer comming inn 
+new_customers = pd.DataFrame({
+    'tenure'          : [2,  45,  1, 60,  8],
+    'MonthlyCharges'  : [85, 45, 95, 35, 78],
+    'TotalCharges'    : [170, 2025, 95, 2100, 624],
+    'SeniorCitizen'   : [0, 0, 1, 0, 0],
+    'ContractRisk'    : [3, 2, 3, 1, 3],
+    'Isautopay'       : [0, 1, 0, 1, 0],
+    'Isnewcustomer'   : [1, 0, 1, 0, 1],
+    'ServiceCount'    : [1, 4, 0, 5, 2],
+    'IshighValue'     : [1, 0, 1, 0, 1],
+    'ChargesPerTenure': [56.7, 44.7, 47.5, 34.4, 74.7]
+})
+
+new_customers = new_customers.reindex(columns= features_loaded, fill_value=0)
+
+
+#sales and predict
+new_scaled = scaler_loaded.transform(new_customers)
+new_scaled = scaler_loaded.transform(new_customers)
+probabilities = model_loaded.predict_proba(new_scaled)[:,1]
+predictions   = (probabilities >= threshold_loaded).astype(int)
+
+print("new customer prediction")
+pred_df = pd.DataFrame({
+    'Customer'   : ['C1','C2','C3','C4','C5'],
+    'Tenure'     : [2, 45, 1, 60, 8],
+    'Monthly$'   : [85, 45, 95, 35, 78],
+    'Churn Risk' : [f"{p*100:.1f}%" for p in probabilities],
+    'Prediction' : ['🚨 WILL CHURN' if p==1
+                    else '✅ WILL STAY' for p in predictions],
+    'Action'     : ['Send retention offer!' if p==1
+                    else 'No action needed' for p in predictions]
+})
+
+print(pred_df.to_string(index=False))
+
+#save preddcition
+pred_df.to_csv('reports/predictions.csv', index=False)
+print("\n✅ Predictions saved!")
+print("\n🏆 churn_model.py COMPLETE!")
 
 
     

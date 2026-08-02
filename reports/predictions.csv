@@ -1,0 +1,6 @@
+Customer,Tenure,Monthly$,Churn Risk,Prediction,Action
+C1,2,85,11.6%,✅ WILL STAY,No action needed
+C2,45,45,6.0%,✅ WILL STAY,No action needed
+C3,1,95,14.2%,✅ WILL STAY,No action needed
+C4,60,35,4.2%,✅ WILL STAY,No action needed
+C5,8,78,7.3%,✅ WILL STAY,No action needed
