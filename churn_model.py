@@ -361,3 +361,97 @@ plt.show()
 print("✅ Evaluation charts saved!")
 
 #thresold tuning
+print("thresold tuning for busineess")
+
+thresholds = np.arange(0.1, 0.9, 0.05)
+results_thresh=[]
+
+for thresh in thresholds:
+    pred= (lr_proba >= thresh).astype(int)
+    cm_t = confusion_matrix(y_test, pred)
+    tn_t, fp_t, fn_t, tp_t= cm_t.ravel()
+
+    cost = (fn_t*500)+ (fp_t *50)
+    saved = tp_t*500*0.3
+    rec = recall_score(y_test, pred)
+    prec= recall_score(y_test, pred)
+    
+    f1 = f1_score(y_test, pred, zero_division=0)
+
+
+    results_thresh.append({
+         'Threshold' : round(thresh, 2),
+        'Recall'    : round(rec, 4),
+        'Precision' : round(prec, 4),
+        'F1'        : round(f1, 4),
+        'Cost'      : cost,
+        'Saved'     : round(saved, 0),
+        'TP'        : tp_t,
+        'FN'        : fn_t
+    })
+
+
+thresh_df = pd.DataFrame (results_thresh)  
+
+
+print(thresh_df[['Threshold','Recall','Precision','F1','Cost','Saved']].to_string(index=False))
+
+# best threshold by minimum cost
+
+best_idx = thresh_df['Cost'].idxmin()
+best_thresh = thresh_df.loc[best_idx, 'Threshold']
+best_cost = thresh_df.loc[best_idx, 'Cost']
+best_saved = thresh_df.loc[best_idx, 'Saved']
+
+
+
+print(f"\n🎯 Optimal Threshold : {best_thresh}")
+print(f"   Minimum Cost     : ${best_cost:,}")
+print(f"   Revenue Saved    : ${best_saved:,}")
+
+
+#visualization
+
+fig, axes = plt.subplots(1,2, figsize=(14,5))
+
+#cost curve
+
+axes[0].plot(thresh_df['Threshold'],
+             thresh_df['Cost'],
+             'r-o', linewidth=2)
+axes[0].axvline(best_thresh, color='green',
+                linestyle='--',
+                label=f'Optimal={best_thresh}')
+axes[0].set_title('Business Cost vs Threshold')
+axes[0].set_xlabel('Threshold')
+axes[0].set_ylabel('Total Cost ($)')
+axes[0].legend()
+
+
+#recall vs preccision
+axes[1].plot(thresh_df['Threshold'],
+             thresh_df['Recall'],
+             'b-o', label='Recall')
+axes[1].plot(thresh_df['Threshold'],
+             thresh_df['Precision'],
+             'g-o', label='Precision')
+axes[1].plot(thresh_df['Threshold'],
+             thresh_df['F1'],
+             'r-o', label='F1')
+axes[1].axvline(best_thresh, color='black',
+                linestyle='--',
+                label=f'Optimal={best_thresh}')
+axes[1].set_title('Metrics vs Threshold')
+axes[1].set_xlabel('Threshold')
+axes[1].legend()
+
+plt.tight_layout()
+plt.savefig('threshold_tuning.png',
+            dpi=150, bbox_inches='tight')
+plt.show()
+
+
+    
+
+
+    
