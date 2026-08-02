@@ -15,6 +15,8 @@ from xgboost import XGBClassifier
 import warnings
 from sklearn.metrics import roc_curve, auc
 from sklearn.model_selection import cross_val_score
+import joblib
+import os
 warnings.filterwarnings('ignore')
 
 df= pd.read_csv("telco_churn.csv")
@@ -449,6 +451,38 @@ plt.tight_layout()
 plt.savefig('threshold_tuning.png',
             dpi=150, bbox_inches='tight')
 plt.show()
+
+
+print("saving model")
+
+model_data = {
+    'model'    : lr,
+    'scaler'   : scaler,
+    'features' : list(X_train.columns),
+    'threshold': best_thresh,
+    'auc'      : cv_scores.mean()
+
+}
+
+os.makedirs('models', exist_ok=True)
+os.makedirs('reports', exist_ok=True)
+
+joblib.dump(model_data, 'models/churn_model.pkl')
+size = os.path.getsize('models/churn_model.pkl')/1024
+print(f"MOdel saved size : {size:.2f} KB")
+
+
+#load and verify
+loaded= joblib.load('models/churn_model.pkl')
+model_loaded = loaded['model']
+scaler_loaded - loaded['scaler']
+threshold_loaded = loaded['threshold']
+features_loaded = loaded['features']
+
+print(f"loaded  and verify ")
+print(f"   Threshold : {threshold_loaded}")
+print(f"   AUC       : {loaded['auc']:.4f}")
+print(f"   Features  : {len(features_loaded)}")
 
 
     
