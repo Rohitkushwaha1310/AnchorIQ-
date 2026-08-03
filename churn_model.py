@@ -538,5 +538,5 @@ df['Risk_Level']= (df['Churn_Probability']>= best_thresh ).astype(int)
 
 df.to_csv('reports/churn_with_predictions.csv',
           index=False)
-print("✅ Data exported for Power BI!")
+print(" Data exported for Power BI! is successfull")
 print(f"Risk distribution:\n{df['Risk_Level'].value_counts()}")
