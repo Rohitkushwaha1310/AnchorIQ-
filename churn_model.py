@@ -540,3 +540,11 @@ df.to_csv('reports/churn_with_predictions.csv',
           index=False)
 print(" Data exported for Power BI! is successfull")
 print(f"Risk distribution:\n{df['Risk_Level'].value_counts()}")
+
+df['Risk_Level'] = 'Low Risk'
+df.loc[df['Churn_Probability'] >= 0.3, 'Risk_Level'] = 'Medium Risk'
+df.loc[df['Churn_Probability'] >= 0.6, 'Risk_Level'] = 'High Risk'
+
+print(df['Risk_Level'].value_counts())
+df.to_csv('reports/churn_with_predictions.csv', index=False)
+print("Re-exported with fixed labels!")
