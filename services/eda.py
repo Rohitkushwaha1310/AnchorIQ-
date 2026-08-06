@@ -11,7 +11,7 @@ def auto_eda(df: pd.DataFrame,
              target: str = None,
              save_dir: str = 'charts') -> list:
     """
-    Auto generate EDA charts for ANY dataset.
+    Auto generate EDA  accordinng charts for ANY dataset.
     Returns list of saved chart paths.
     """
     os.mkerdirs
