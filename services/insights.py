@@ -1,14 +1,16 @@
-# services/insights.py
-from google import genai
-from google.genai import types
-import json
 import os
+import json
+from dotenv import load_dotenv
+from groq import Groq
 
-# ---- CONFIGURE GEMINI ----
-# Get free key: https://makersuite.google.com/app/apikey
-GEMINI_API_KEY = "Geminni api"
+load_dotenv()
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY is not set in .env")
+
+client = Groq(api_key=GROQ_API_KEY)
 
 def generate_insights(inspection: dict,
                       model_results: dict,
@@ -22,40 +24,53 @@ DATASET:
 - Features : {inspection['columns']}
 - Target   : {target}
 - Missing  : {inspection['missing_total']}
+- Duplicates: {inspection['duplicates']}
 
 ML RESULTS:
 - Best Model : {model_results.get('best_model','N/A')}
 - AUC Score  : {model_results.get('auc','N/A')}
 - Accuracy   : {model_results.get('accuracy','N/A')}%
+- CV AUC     : {model_results.get('cv_mean','N/A')}
 
-Write:
-## Executive Summary (2-3 sentences)
-## Top 3 Key Findings (with numbers)
-## Top 3 Recommendations (actionable)
-## Risk Assessment (1-2 sentences)
+Write a professional business report:
 
-Professional tone. Under 300 words.
+## Executive Summary
+(2-3 sentences about data health and model performance)
+
+## Top 3 Key Findings
+(Specific findings with numbers)
+
+## Top 3 Business Recommendations
+(Actionable steps)
+
+## Risk Assessment
+(1-2 sentences on risks)
+
+Professional tone. Under 300 words. No technical jargon.
 """
-        response = client.models.generate_content(
-            model='gemini-2.0-flash',
-            contents=prompt
+        response = client.chat.completions.create(
+            model="openai/gpt-oss-120b",  # free & fast!
+            messages=[
+                {"role": "system",
+                 "content": "You are a senior data analyst."},
+                {"role": "user",
+                 "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=500
         )
-        print("✅ Gemini insights generated!")
-        return response.text
+        insights = response.choices[0].message.content
+        print("✅ Groq insights generated!")
+        return insights
 
     except Exception as e:
-        print(f"⚠️ Gemini failed: {e}")
+        print(f"⚠️ Groq failed: {e}")
         return _rule_based_insights(
             inspection, model_results, target)
-
 
 def _rule_based_insights(inspection: dict,
                           model_results: dict,
                           target: str) -> str:
-    """
-    Fallback insights if Gemini API fails.
-    Rule-based but still professional!
-    """
     auc      = model_results.get('auc', 0)
     accuracy = model_results.get('accuracy', 0)
     best     = model_results.get('best_model', 'ML Model')
@@ -64,58 +79,39 @@ def _rule_based_insights(inspection: dict,
     missing  = inspection['missing_total']
     dupes    = inspection['duplicates']
 
-    # Model quality assessment
-    if auc >= 0.85:
-        model_quality = "excellent"
-        confidence    = "high confidence"
-    elif auc >= 0.75:
-        model_quality = "good"
-        confidence    = "reasonable confidence"
-    else:
-        model_quality = "moderate"
-        confidence    = "limited confidence"
+    quality = "excellent" if auc >= 0.85 else \
+              "good" if auc >= 0.75 else "moderate"
 
     return f"""
 ## Executive Summary
-Analysis of **{rows:,} records** across **{cols} features** 
-has been completed successfully. The {best} model achieved 
-an **AUC of {auc}** — indicating {model_quality} predictive 
-power for **{target}** with {confidence}.
+Analysis of **{rows:,} records** across **{cols} features**
+completed successfully. {best} achieved **AUC of {auc}**
+— {quality} predictive power for **{target}**.
 
 ## Top 3 Key Findings
-1. **Data Quality**: Dataset contained {missing} missing 
-   values and {dupes} duplicates — all automatically 
-   resolved before analysis.
-
-2. **Model Performance**: {best} achieved {accuracy}% 
-   accuracy with AUC of {auc} — {'✅ Strong' if auc >= 0.8 
-   else '⚠️ Needs improvement'} for business deployment.
-
-3. **Predictive Power**: Cross-validated AUC of 
-   {model_results.get('cv_mean', 'N/A')} confirms model 
-   stability across different data splits.
+1. **Data Quality**: {missing} missing values and
+   {dupes} duplicates — all automatically resolved.
+2. **Model Performance**: {best} achieved {accuracy}%
+   accuracy with AUC {auc} —
+   {'✅ Strong' if auc >= 0.8 else '⚠️ Needs improvement'}.
+3. **Stability**: CV AUC {model_results.get('cv_mean','N/A')}
+   confirms consistent performance across data splits.
 
 ## Top 3 Business Recommendations
-1. **Deploy the model** for real-time {target} prediction 
-   — flag high-risk cases before they occur.
-
-2. **Focus retention efforts** on customers identified 
-   as high-risk by the model — proactive beats reactive.
-
-3. **Retrain monthly** as new data arrives to maintain 
-   model accuracy and capture changing patterns.
+1. Deploy model for real-time {target} prediction.
+2. Focus retention on high-risk flagged customers.
+3. Retrain monthly with fresh data.
 
 ## Risk Assessment
-- Model confidence: {'High' if auc >= 0.85 else 
-  'Medium' if auc >= 0.75 else 'Low'}
-- Data freshness: Ensure monthly data updates
-- Bias check: Validate model fairness across segments
+Model confidence: {'High' if auc >= 0.85 else
+'Medium' if auc >= 0.75 else 'Low'}.
+Validate fairness across customer segments monthly.
 """
 
 
 
 
-
+# Add at bottom to test
 if __name__ == "__main__":
     # Mock data to test
     inspection = {
