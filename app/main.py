@@ -69,7 +69,7 @@ async def analyze(file: UploadFile = File(...)):
     print(f"   Target detected: {target}")
 
     #step 2
-    print("\n Step 2: Cleaning data...")
+    print("\n Step 2: Cleaning  the data...")
     df_clean, clean_report = auto_clean(df_raw.copy())
     print(f"   Clean shape: {df_clean.shape}")
 
