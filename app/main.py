@@ -60,7 +60,7 @@ async def analyze(file: UploadFile = File(...)):
     except Exception as e:
         return {"error": f"Could not read CSV: {str(e)}"}
 
-    print(f"✅ Loaded: {df_raw.shape}")
+    print(f" Loaded: {df_raw.shape}")
 
     #step 1 inspect
     print("\n Step 1: Inspecting dataset...")
