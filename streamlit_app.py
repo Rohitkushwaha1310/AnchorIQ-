@@ -68,9 +68,9 @@ with st.sidebar:
 col1, col2, col3 = st.columns([1,2,1])
 with col2:
     uploaded = st.file_uploader(
-        "📂 Upload your CSV file",
-        type   =['csv'],
-        help   ="Any CSV works — AnchorIQ handles the rest!")
+    "📂 Upload your data file",
+    type=['csv', 'xlsx', 'xls', 'json'],
+    help="Supports CSV, Excel (.xlsx/.xls) and JSON!")
 
     if uploaded:
         st.success(f"✅ File ready: **{uploaded.name}**")

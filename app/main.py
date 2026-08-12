@@ -55,10 +55,27 @@ async def analyze(file: UploadFile = File(...)):
     print(f"{'='*50}")
 
     contents = await file.read()
+    filename = file.filename.lower()
+
     try:
-        df_raw = pd.read_csv(io.BytesIO(contents))
+        if filename.endswith('.csv'):
+            df_raw = pd.read_csv(
+            io.BytesIO(contents),
+            encoding_errors='replace')
+
+        elif filename.endswith(('.xlsx', '.xls')):
+            df_raw = pd.read_excel(
+            io.BytesIO(contents))
+
+        elif filename.endswith('.json'):
+            df_raw = pd.read_json(
+            io.BytesIO(contents))
+
+        else:
+            return {"error": "Unsupported format! Use CSV, Excel or JSON"}
+
     except Exception as e:
-        return {"error": f"Could not read CSV: {str(e)}"}
+        return {"error": f"Could not read file: {str(e)}"}
 
     print(f" Loaded: {df_raw.shape}")
 
