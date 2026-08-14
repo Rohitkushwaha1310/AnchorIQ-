@@ -188,7 +188,7 @@ if uploaded and analyze_btn:
 **CV Std Dev:** {ml.get('cv_std','—')}
                 """)
         else:
-            st.warning("⚠️ ML model could not be trained. "
+            st.warning(" ML model could not be trained. "
                       "No suitable target column found.")
 
     #  TAB 3: AI INSIGHTS 
