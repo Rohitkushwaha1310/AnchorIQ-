@@ -9,21 +9,24 @@ import os
 
 def auto_eda(df: pd.DataFrame,
              target: str = None,
-             save_dir: str = 'charts') -> list:
+             save_dir: str = 'charts',
+             analysis_type: str = 'auto') -> list:
     """
-    Auto generate EDA  accordinng charts for ANY dataset.
+    Auto generate EDA charts for ANY dataset.
     Returns list of saved chart paths.
     """
-    os.makedirs(save_dir , exist_ok = True)
-    charts =[]
+    os.makedirs(save_dir, exist_ok=True)
+    charts = []
 
     sns.set_style('whitegrid')
 
     nums_cols = df.select_dtypes(
         include = [np.number]).columns.tolist()
     cat_cols = df.select_dtypes(
-        include=['object']
+        include=['object', 'category', 'string']
     ).columns.tolist()
+    # only columns that make a readable chart (skips IDs / free text)
+    cat_cols = [c for c in cat_cols if 2 <= df[c].nunique() <= 15]
 
     if target in nums_cols:
         nums_cols.remove(target)
@@ -54,7 +57,7 @@ def auto_eda(df: pd.DataFrame,
         plt.savefig(path, dpi=120, bbox_inches='tight')
         plt.close()
         charts.append(path)
-        print(f"✅ Chart 1: Distributions saved")
+        print(f"[OK] Chart 1: Distributions saved")
     #chart 2 correlation heap
     if len(nums_cols)>=2:
         corr_cols = nums_cols[:10]
@@ -72,7 +75,7 @@ def auto_eda(df: pd.DataFrame,
         plt.savefig(path, dpi=120, bbox_inches='tight')
         plt.close()
         charts.append(path)
-        print(f"✅ Chart 2: Correlation saved")
+        print(f"[OK] Chart 2: Correlation saved")
 
 
     #chart 3 : targte distribbution    
@@ -101,10 +104,10 @@ def auto_eda(df: pd.DataFrame,
         plt.savefig(path, dpi=120, bbox_inches='tight')
         plt.close()
         charts.append(path)
-        print(f"✅ Chart 3: Target distribution saved")
+        print(f"[OK] Chart 3: Target distribution saved")
 
 
-    # chart 4 catergories vs target
+    # chart 4: categories vs target (numeric/binary target -> mean rate; text target -> stacked share)
     if target and cat_cols:
         n    = min(len(cat_cols), 4)
         cols = cat_cols[:n]
@@ -112,30 +115,37 @@ def auto_eda(df: pd.DataFrame,
         fig.suptitle(f'Features vs {target}',
                      fontsize=14, fontweight='bold')
         axes = axes.flatten()
+        drawn = 0
+        target_is_num = pd.api.types.is_numeric_dtype(df[target])
         for i, col in enumerate(cols):
             try:
-                churn_rate = df.groupby(col)[
-                    target].mean() * 100
-                axes[i].bar(
-                    churn_rate.index.astype(str),
-                    churn_rate.values,
-                    color='steelblue')
+                if target_is_num:
+                    rate = df.groupby(col)[target].mean()
+                    if df[target].nunique() <= 2:
+                        rate = rate * 100
+                    axes[i].bar(rate.index.astype(str), rate.values, color='steelblue')
+                    axes[i].set_ylabel(f'{target} rate %' if df[target].nunique() <= 2 else f'avg {target}')
+                else:
+                    share = pd.crosstab(df[col], df[target], normalize='index') * 100
+                    share.plot(kind='bar', stacked=True, ax=axes[i], legend=(i == 0))
+                    axes[i].set_ylabel(f'% by {target}')
                 axes[i].set_title(f'{col} vs {target}')
-                axes[i].tick_params(
-                    axis='x', rotation=15)
-                axes[i].set_ylabel(f'{target} rate %')
-            except:
-                pass
+                axes[i].tick_params(axis='x', rotation=15)
+                drawn += 1
+            except Exception as e:
+                print(f"[WARN] chart 4 panel '{col}' skipped: {e}")
+                axes[i].set_visible(False)
         for j in range(n, 4):
             axes[j].set_visible(False)
-        plt.tight_layout()
-        path = f'{save_dir}/04_categorical_vs_target.png'
-        plt.savefig(path, dpi=120, bbox_inches='tight')
+        if drawn:
+            plt.tight_layout()
+            path = f'{save_dir}/04_categorical_vs_target.png'
+            plt.savefig(path, dpi=120, bbox_inches='tight')
+            charts.append(path)
+            print(f"[OK] Chart 4: Categorical vs target saved")
         plt.close()
-        charts.append(path)
-        print(f"✅ Chart 4: Categorical vs target saved")
     #chart 5 boxplots
-    if nums_cols and target:
+    if nums_cols and target and 2 <= df[target].nunique() <= 10:
         cols = nums_cols[:4]
         fig, axes = plt.subplots(2, 2, figsize=(12, 8))
         fig.suptitle('Feature Distributions by Target',
@@ -146,18 +156,17 @@ def auto_eda(df: pd.DataFrame,
                 df.boxplot(column=col,
                            by=target, ax=axes[i])
                 axes[i].set_title(col)
-            except:
-                pass
+            except Exception as e:
+                print(f"[WARN] boxplot '{col}' skipped: {e}")
         plt.tight_layout()
         path = f'{save_dir}/05_boxplots.png'
         plt.savefig(path, dpi=120, bbox_inches='tight')
         plt.close()
         charts.append(path)
-        print(f"✅ Chart 5: Boxplots saved")
+        print(f"[OK] Chart 5: Boxplots saved")
 
-    print(f"\n✅ Total charts generated: {len(charts)}")
-    return charts#     
-        
+    print(f"\n[OK] Total charts generated: {len(charts)}")
+    return charts
 
 
 if __name__ == "__main__":

@@ -1,139 +1,81 @@
-import os
+"""
+services/insights.py (v3)
+The LLM receives verified FACTS (numbers computed from the data) and only writes them up.
+If no API key / the API fails, a data-driven fallback renders the same facts - no generic templates.
+"""
 import json
+import os
+
 from dotenv import load_dotenv
-from groq import Groq
 
 load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-if not GROQ_API_KEY:
-    raise ValueError("GROQ_API_KEY is not set in .env")
-
-client = Groq(api_key=GROQ_API_KEY)
-
-def generate_insights(inspection: dict,
-                      model_results: dict,
-                      target: str) -> str:
-    try:
-        prompt = f"""
-You are a senior data analyst presenting to a CEO.
-
-DATASET:
-- Records  : {inspection['rows']:,}
-- Features : {inspection['columns']}
-- Target   : {target}
-- Missing  : {inspection['missing_total']}
-- Duplicates: {inspection['duplicates']}
-
-ML RESULTS:
-- Best Model : {model_results.get('best_model','N/A')}
-- AUC Score  : {model_results.get('auc','N/A')}
-- Accuracy   : {model_results.get('accuracy','N/A')}%
-- CV AUC     : {model_results.get('cv_mean','N/A')}
-
-Write a professional business report:
-
-## Executive Summary
-(2-3 sentences about data health and model performance)
-
-## Top 3 Key Findings
-(Specific findings with numbers)
-
-## Top 3 Business Recommendations
-(Actionable steps)
-
-## Risk Assessment
-(1-2 sentences on risks)
-
-Professional tone. Under 300 words. No technical jargon.
-"""
-        response = client.chat.completions.create(
-            model="openai/gpt-oss-120b",  # free & fast!
-            messages=[
-                {"role": "system",
-                 "content": "You are a senior data analyst."},
-                {"role": "user",
-                 "content": prompt}
-            ],
-            temperature=0.7,
-            max_tokens=500
-        )
-        insights = response.choices[0].message.content
-        print("✅ Groq insights generated!")
-        return insights
-
-    except Exception as e:
-        print(f"⚠️ Groq failed: {e}")
-        return _rule_based_insights(
-            inspection, model_results, target)
-
-def _rule_based_insights(inspection: dict,
-                          model_results: dict,
-                          target: str) -> str:
-    auc      = model_results.get('auc', 0)
-    accuracy = model_results.get('accuracy', 0)
-    best     = model_results.get('best_model', 'ML Model')
-    rows     = inspection['rows']
-    cols     = inspection['columns']
-    missing  = inspection['missing_total']
-    dupes    = inspection['duplicates']
-
-    quality = "excellent" if auc >= 0.85 else \
-              "good" if auc >= 0.75 else "moderate"
-
-    return f"""
-## Executive Summary
-Analysis of **{rows:,} records** across **{cols} features**
-completed successfully. {best} achieved **AUC of {auc}**
-— {quality} predictive power for **{target}**.
-
-## Top 3 Key Findings
-1. **Data Quality**: {missing} missing values and
-   {dupes} duplicates — all automatically resolved.
-2. **Model Performance**: {best} achieved {accuracy}%
-   accuracy with AUC {auc} —
-   {'✅ Strong' if auc >= 0.8 else '⚠️ Needs improvement'}.
-3. **Stability**: CV AUC {model_results.get('cv_mean','N/A')}
-   confirms consistent performance across data splits.
-
-## Top 3 Business Recommendations
-1. Deploy model for real-time {target} prediction.
-2. Focus retention on high-risk flagged customers.
-3. Retrain monthly with fresh data.
-
-## Risk Assessment
-Model confidence: {'High' if auc >= 0.85 else
-'Medium' if auc >= 0.75 else 'Low'}.
-Validate fairness across customer segments monthly.
-"""
+GROQ_MODELS = [m.strip() for m in os.getenv(
+    "GROQ_MODELS", "llama-3.3-70b-versatile,llama-3.1-70b-versatile,llama-3.1-8b-instant,llama3-70b-8192,llama3-8b-8192,mixtral-8x7b-32768,gemma2-9b-it").split(",") if m.strip()]
 
 
+def generate_insights(facts: dict, analysis_type: str = "general") -> str:
+    compact = {k: facts[k] for k in ("overview", "findings", "recommendations", "warnings")}
+    prompt = f"""You are a senior data analyst writing for a business owner.
+Use ONLY the verified FACTS below. Do not invent numbers, columns or causes. If something is uncertain, say so.
+Explain in plain language, no jargon. Keep under 450 words.
+
+FACTS (JSON):
+{json.dumps(compact, default=str)[:9000]}
+
+Write markdown with exactly these sections:
+## 🎯 Executive Summary
+## 📊 Key Findings   (3-5 numbered points, each with the concrete numbers)
+## 💡 Recommendations   (3-4 actions, ordered by priority; each says WHY (evidence) and expected impact; keep stated assumptions)
+## ⚠️ Risks & Caveats
+## 🚀 Next Steps   (2-3 bullets)"""
+    if GROQ_API_KEY:
+        try:
+            from groq import Groq
+            client = Groq(api_key=GROQ_API_KEY)
+            available_models = list(GROQ_MODELS)
+            try:
+                listed = [m.id for m in client.models.list().data if getattr(m, "active", True)]
+                if listed:
+                    available_models = [m for m in GROQ_MODELS if m in listed] + [m for m in listed if m not in GROQ_MODELS]
+            except Exception:
+                pass
+
+            for m in available_models:
+                try:
+                    r = client.chat.completions.create(
+                        model=m, temperature=0.3, max_tokens=900,
+                        messages=[{"role": "system", "content": "You write accurate, evidence-based business analysis."},
+                                  {"role": "user", "content": prompt}])
+                    text = r.choices[0].message.content
+                    if text and len(text) > 200:
+                        return text
+                except Exception:
+                    continue
+        except Exception as e:
+            print(f"[WARN] Groq unavailable: {e}")
+    return render_from_facts(facts)
 
 
-# Add at bottom to test
-if __name__ == "__main__":
-    # Mock data to test
-    inspection = {
-        'rows'         : 7043,
-        'columns'      : 21,
-        'missing_total': 11,
-        'duplicates'   : 0,
-        'stats'        : {
-            'tenure': {'mean': 32.4, 'median': 29,
-                       'std': 24.6, 'min': 0,
-                       'max': 72, 'skewness': 0.24,
-                       'nulls': 0}
-        }
-    }
-    model_results = {
-        'problem_type': 'classification',
-        'best_model'  : 'Logistic Regression',
-        'auc'         : 0.8189,
-        'accuracy'    : 80.62,
-        'cv_mean'     : 0.8123
-    }
-
-    insights = generate_insights(
-        inspection, model_results, 'Churn')
-    print(insights)
+def render_from_facts(facts: dict) -> str:
+    o, F, R, W = facts["overview"], facts["findings"], facts["recommendations"], facts["warnings"]
+    lines = ["## 🎯 Executive Summary",
+             f"Analysed **{o['rows']:,} records** x **{o['columns']} columns**"
+             + (f", predicting **{o['target']}**." if o["target"] else " (no outcome column found, so we looked for segments, anomalies and trends).")]
+    top = next((f["text"] for f in F if f["kind"] in ("gains", "trend", "base_rate")), None)
+    if top:
+        lines.append(top)
+    lines += ["", "## 📊 Key Findings"]
+    lines += [f"{i}. {f['text']}" for i, f in enumerate(F[:5], 1)] or ["No strong patterns were found."]
+    lines += ["", "## 💡 Recommendations"]
+    for r in R[:4]:
+        lines.append(f"{r['priority']}. **{r['title']}** - {r['action']} _Impact: {r['impact']}_")
+    if not R:
+        lines.append("Not enough signal for a specific recommendation.")
+    lines += ["", "## ⚠️ Risks & Caveats"]
+    lines += [f"- {w}" for w in W] or ["- Findings are correlations in your historical data, not proof of cause. Re-run as new data arrives."]
+    lines += ["", "## 🚀 Next Steps",
+              "- Download the predictions file and start with the highest-priority group." if o["target"] else "- Review the segments and flagged records.",
+              "- Re-run this analysis monthly with fresh data to track whether actions work."]
+    return "\n".join(lines)
