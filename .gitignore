@@ -3,8 +3,24 @@
 
 # Python cache
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 
-# Virtual environment
+# Virtual environments
 venv/
 .venv/
+env/
+
+# Generated runtime data and uploads
+uploads/
+charts/
+reports/
+
+# Trained machine learning model artifacts
+models/*.pkl
+
+# Testing & IDE artifacts
+.pytest_cache/
+.vscode/
+.idea/
+*.png

@@ -1,0 +1,37 @@
+{
+  "column_names": [
+    "tenure",
+    "charges",
+    "contract"
+  ],
+  "columns": {
+    "tenure": {
+      "type": "int64",
+      "kind": "numeric",
+      "min": 1.0,
+      "max": 72.0
+    },
+    "charges": {
+      "type": "float64",
+      "kind": "numeric",
+      "min": 20.0,
+      "max": 90.0
+    },
+    "contract": {
+      "type": "object",
+      "kind": "categorical",
+      "allowed_categories": [
+        "Month-to-month",
+        "One year",
+        "Two year"
+      ]
+    }
+  },
+  "numeric_cols": [
+    "tenure",
+    "charges"
+  ],
+  "categorical_cols": [
+    "contract"
+  ]
+}

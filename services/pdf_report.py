@@ -1,10 +1,4 @@
-"""
-services/pdf_report.py
-Dynamic Executive PDF Report Generator for AnchorIQ — Universal, Crisp, Professional.
-"""
-
 import os
-import io
 from datetime import datetime
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -15,365 +9,397 @@ from reportlab.platypus import (
     HRFlowable, Image, PageBreak, KeepTogether
 )
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY, TA_RIGHT
+from reportlab.pdfgen import canvas
 
 
-# ── Colour Palette ────────────────────────────────────────────────────────────
-NAVY    = colors.HexColor("#0f172a")
-DARK    = colors.HexColor("#1e293b")
-BLUE    = colors.HexColor("#3B82F6")
-INDIGO  = colors.HexColor("#6366F1")
-GREEN   = colors.HexColor("#10B981")
-RED     = colors.HexColor("#EF4444")
-ORANGE  = colors.HexColor("#F59E0B")
-PURPLE  = colors.HexColor("#8B5CF6")
-BLACK   = colors.HexColor("#1e293b")
-GRAY    = colors.HexColor("#64748B")
-LIGHT   = colors.HexColor("#F8FAFC")
-WHITE   = colors.white
+# Brand Palette
+NAVY   = colors.HexColor("#1B3A6B")
+TEAL   = colors.HexColor("#0EA5E9")
+DARK   = colors.HexColor("#1E293B")
+GRAY   = colors.HexColor("#64748B")
+LIGHT  = colors.HexColor("#F8FAFC")
+WHITE  = colors.white
+GREEN  = colors.HexColor("#10B981")
+RED    = colors.HexColor("#EF4444")
 
-# Analysis type → accent colour
-TYPE_COLORS = {
-    "churn"  : RED,
-    "sales"  : GREEN,
-    "fraud"  : ORANGE,
-    "hr"     : PURPLE,
-    "general": INDIGO,
-    "auto"   : BLUE,
-}
 
-TYPE_LABELS = {
-    "churn"  : "Customer Churn & Retention Analysis",
-    "sales"  : "Sales & Revenue Performance Report",
-    "fraud"  : "Fraud & Anomaly Detection Analysis",
-    "hr"     : "Workforce & Talent Analytics Report",
-    "general": "Exploratory Data Science Report",
-    "auto"   : "Autonomous Machine Learning Report",
-}
+class NumberedCanvas(canvas.Canvas):
+    """Two-pass canvas for 'AnchorIQ | Autonomous Business Intelligence | Page X of Y' footer."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._saved_page_states = []
+
+    def showPage(self):
+        self._saved_page_states.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self):
+        num_pages = len(self._saved_page_states)
+        for state in self._saved_page_states:
+            self.__dict__.update(state)
+            self.draw_footer(num_pages)
+            super().showPage()
+        super().save()
+
+    def draw_footer(self, page_count):
+        self.saveState()
+        self.setFont("Helvetica", 8)
+        self.setFillColor(GRAY)
+        self.setStrokeColor(colors.HexColor("#CBD5E1"))
+        self.setLineWidth(0.5)
+        self.line(18 * mm, 12 * mm, 192 * mm, 12 * mm)
+        footer_text = f"AnchorIQ | Autonomous Business Intelligence | Page {self._pageNumber} of {page_count}"
+        self.drawCentredString(105 * mm, 8 * mm, footer_text)
+        self.restoreState()
 
 
 def _style(name, **kw):
     return ParagraphStyle(name, **kw)
 
 
-def _hr(accent=INDIGO, thickness=1.5):
-    return HRFlowable(width="100%", thickness=thickness, color=accent, spaceAfter=3 * mm, spaceBefore=1 * mm)
-
-
-def _section(title, accent=INDIGO):
-    st = _style("sec", fontSize=13, textColor=accent,
-                fontName="Helvetica-Bold",
-                spaceBefore=5 * mm, spaceAfter=2 * mm)
-    return [Paragraph(title, st), _hr(accent, thickness=1.2)]
-
-
-def _bullet(text, accent=INDIGO):
-    st = _style("bul", fontSize=9.5, textColor=BLACK,
-                fontName="Helvetica", spaceAfter=1.8 * mm,
-                leading=13.5, leftIndent=12, firstLineIndent=-10)
-    return Paragraph(f"<font color='#{accent.hexval()[2:]}'>&bull;</font> {text}", st)
-
-
-def generate_pdf_report(
-    result: dict,
-    chart_paths: list | None = None,
-    output_path: str = "reports/AnchorIQ_Report.pdf",
-) -> str:
+def generate_pdf_report(result: dict,
+                        chart_paths: list | None = None,
+                        output_path: str = "reports/AnchorIQ_Report.pdf") -> str:
     """
-    Generate a full executive PDF analysis report from the result dict.
-    Returns the path to the saved PDF.
+    Generate professional executive PDF report using ReportLab with exact pages:
+    Page 1 — Cover: AnchorIQ logo, analysis type, dataset, date, KPI banner
+    Page 2 — Dataset Overview: Inspection table, target info, numerical stats
+    Page 3 — Cleaning Report: Steps applied list, before/after shape comparison
+    Pages 4-5 — EDA Charts: Embed all generated chart PNGs with captions (2 per page)
+    Page 6 — ML Results: Model comparison table (best highlighted green), confusion matrix, CV scores
+    Page 7 — AI Insights: Full insights markdown rendered, navy headers, bullet points
+    Footer on every page: AnchorIQ | Autonomous Business Intelligence | Page X of Y
     """
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     if chart_paths is None:
         chart_paths = result.get("chart_paths", [])
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
-    analysis_type = result.get("inspection", {}).get("analysis_type", "auto")
-    accent        = TYPE_COLORS.get(analysis_type, BLUE)
-    label         = TYPE_LABELS.get(analysis_type, "Autonomous Data Analysis")
-    filename      = result.get("filename", "Dataset")
-    insp          = result.get("inspection", {})
-    clean         = result.get("cleaning", {})
-    ml            = result.get("model_results", {})
+    insp = result.get("inspection", {})
+    clean = result.get("cleaning", {})
+    ml = result.get("model_results", {})
     insights_text = result.get("insights", "")
-    now           = datetime.now().strftime("%B %d, %Y - %H:%M")
-
-    # ── Styles ────────────────────────────────────────────────────────────────
-    title_s  = _style("t",  fontSize=24, textColor=NAVY,
-                      alignment=TA_CENTER, fontName="Helvetica-Bold", leading=28)
-    sub_s    = _style("s",  fontSize=11, textColor=GRAY,
-                      alignment=TA_CENTER, fontName="Helvetica", spaceAfter=2 * mm, leading=14)
-    meta_s   = _style("m",  fontSize=8.5, textColor=GRAY,
-                      alignment=TA_CENTER, fontName="Helvetica", spaceAfter=3 * mm)
-    body_s   = _style("b",  fontSize=9.5, textColor=BLACK,
-                      fontName="Helvetica", spaceAfter=2 * mm,
-                      leading=14, alignment=TA_JUSTIFY)
-    cap_s    = _style("c",  fontSize=8,  textColor=GRAY,
-                      alignment=TA_CENTER, fontName="Helvetica-Oblique",
-                      spaceAfter=3 * mm)
-    footer_s = _style("f",  fontSize=8,  textColor=GRAY,
-                      alignment=TA_CENTER, fontName="Helvetica")
+    analysis_type = result.get("analysis_type", insp.get("analysis_type", "auto")).upper()
+    filename = result.get("filename", "Business Dataset")
+    timestamp = datetime.now().strftime("%B %d, %Y - %H:%M")
 
     doc = SimpleDocTemplate(
-        output_path, pagesize=A4,
-        topMargin=12 * mm, bottomMargin=12 * mm,
-        leftMargin=18 * mm, rightMargin=18 * mm,
+        output_path,
+        pagesize=A4,
+        leftMargin=18 * mm,
+        rightMargin=18 * mm,
+        topMargin=15 * mm,
+        bottomMargin=18 * mm,
     )
+
+    styles = getSampleStyleSheet()
+    title_style = _style("CovTitle", fontSize=28, fontName="Helvetica-Bold", textColor=NAVY, alignment=TA_CENTER, leading=34)
+    subtitle_style = _style("CovSub", fontSize=12, fontName="Helvetica", textColor=TEAL, alignment=TA_CENTER, leading=16)
+    section_style = _style("SecTitle", fontSize=14, fontName="Helvetica-Bold", textColor=NAVY, spaceBefore=4*mm, spaceAfter=2*mm)
+    body_style = _style("Body", fontSize=9, fontName="Helvetica", textColor=DARK, leading=13)
+    body_bold = _style("BodyB", fontSize=9, fontName="Helvetica-Bold", textColor=DARK, leading=13)
+    table_cell = _style("TCell", fontSize=8.5, fontName="Helvetica", textColor=DARK, leading=11)
+    table_cell_bold = _style("TCellB", fontSize=8.5, fontName="Helvetica-Bold", textColor=DARK, leading=11)
+    caption_style = _style("Cap", fontSize=8.5, fontName="Helvetica-Oblique", textColor=GRAY, alignment=TA_CENTER, spaceBefore=1.5*mm, spaceAfter=3*mm)
 
     story = []
 
     # ════════════════════════════════════════════════════════════════════════
-    # PAGE 1: COVER & QUICK STATS
+    # PAGE 1 — COVER PAGE
     # ════════════════════════════════════════════════════════════════════════
-    story.append(Spacer(1, 15 * mm))
-    story.append(Paragraph("AnchorIQ", title_s))
+    story.append(Spacer(1, 25 * mm))
+    story.append(Paragraph("⚓ AnchorIQ", title_style))
     story.append(Spacer(1, 2 * mm))
-    story.append(Paragraph(f"<b>{label}</b>", sub_s))
-    story.append(Paragraph(f"Dataset: <b>{filename}</b>", sub_s))
-    story.append(Spacer(1, 2 * mm))
-    story.append(_hr(accent, thickness=2))
-    story.append(Spacer(1, 2 * mm))
-    story.append(Paragraph(f"Generated: {now} | Powered by AnchorIQ v2.0", meta_s))
-    story.append(Spacer(1, 6 * mm))
-
-    # Quick KPI Banner
-    target_name = str(insp.get("target_column", "N/A"))
-    banner_data = [
-        [
-            Paragraph(f"<font size='14'><b>{insp.get('rows', 0):,}</b></font><br/><font color='#cbd5e1'>Records</font>", sub_s),
-            Paragraph(f"<font size='14'><b>{insp.get('columns', 0)}</b></font><br/><font color='#cbd5e1'>Features</font>", sub_s),
-            Paragraph(f"<font size='14'><b>{target_name[:12]}</b></font><br/><font color='#cbd5e1'>Target</font>", sub_s),
-            Paragraph(f"<font size='14'><b>{insp.get('missing_total', 0)}</b></font><br/><font color='#cbd5e1'>Fixed Nulls</font>", sub_s),
-            Paragraph(f"<font size='14'><b>{insp.get('duplicates', 0)}</b></font><br/><font color='#cbd5e1'>Dupes Cleared</font>", sub_s),
-        ]
-    ]
-    banner = Table(banner_data, colWidths=["20%"] * 5)
-    banner.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), NAVY),
-        ("TEXTCOLOR",  (0, 0), (-1, -1), WHITE),
-        ("ALIGN",      (0, 0), (-1, -1), "CENTER"),
-        ("VALIGN",     (0, 0), (-1, -1), "MIDDLE"),
-        ("PADDING",    (0, 0), (-1, -1), 8),
-    ]))
-    story.append(banner)
-    story.append(Spacer(1, 6 * mm))
-
-    # ════════════════════════════════════════════════════════════════════════
-    # SECTION 1: EXECUTIVE SUMMARY & AI INSIGHTS
-    # ════════════════════════════════════════════════════════════════════════
-    story += _section("1. EXECUTIVE SUMMARY & AI INSIGHTS", accent)
-
-    if insights_text:
-        for line in insights_text.split("\n"):
-            line = line.strip()
-            if not line:
-                story.append(Spacer(1, 1 * mm))
-                continue
-            if line.startswith("## "):
-                st = _style("h2", fontSize=11, textColor=accent,
-                            fontName="Helvetica-Bold", spaceBefore=3 * mm, spaceAfter=1 * mm)
-                story.append(Paragraph(line[3:], st))
-            elif line.startswith("### "):
-                st = _style("h3", fontSize=10, textColor=NAVY,
-                            fontName="Helvetica-Bold", spaceAfter=1 * mm)
-                story.append(Paragraph(line[4:], st))
-            elif line.startswith(("1.", "2.", "3.", "4.", "5.")):
-                story.append(Paragraph(line, body_s))
-            elif line.startswith("- ") or line.startswith("* "):
-                story.append(_bullet(line[2:], accent))
-            else:
-                story.append(Paragraph(line, body_s))
-    else:
-        story.append(Paragraph("Executive insights compiled from exploratory and predictive engines.", body_s))
-
-    story.append(PageBreak())
-
-    # ════════════════════════════════════════════════════════════════════════
-    # SECTION 2: DATASET OVERVIEW & QUALITY AUDIT
-    # ════════════════════════════════════════════════════════════════════════
-    story += _section("2. DATASET OVERVIEW & QUALITY AUDIT", accent)
-
-    quality_pct = max(0, 100 - (insp.get("missing_total", 0) / max(insp.get("rows", 1), 1) * 100))
-    quality_label = "Optimal" if quality_pct >= 95 else "Good" if quality_pct >= 85 else "Action Needed"
-
-    overview_data = [
-        ["Audit Metric", "Value", "Status"],
-        ["Total Records",       f"{insp.get('rows', 0):,}",        "Validated"],
-        ["Total Feature Count", str(insp.get("columns", 0)),        "Validated"],
-        ["Numerical Columns",   str(len(insp.get("numerical_cols", []))), "Active"],
-        ["Categorical Columns", str(len(insp.get("categorical_cols", []))), "Active"],
-        ["Target Column",       str(insp.get("target_column", "N/A")), "Identified"],
-        ["Missing Cells Imputed",str(insp.get("missing_total", 0)), "Resolved"],
-        ["Duplicate Rows Purged",str(insp.get("duplicates", 0)),    "Resolved"],
-        ["Data Quality Index",  f"{quality_pct:.1f}%",              quality_label],
-    ]
-    ov_table = Table(overview_data, colWidths=["50%", "30%", "20%"])
-    ov_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), NAVY),
-        ("TEXTCOLOR",  (0, 0), (-1, 0), WHITE),
-        ("FONTNAME",   (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE",   (0, 0), (-1, -1), 9),
-        ("ALIGN",      (0, 0), (-1, -1), "LEFT"),
-        ("ALIGN",      (2, 0), (2, -1), "CENTER"),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [LIGHT, WHITE]),
-        ("GRID",       (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
-        ("PADDING",    (0, 0), (-1, -1), 5),
-    ]))
-    story.append(ov_table)
+    story.append(Paragraph("Autonomous Business Intelligence Platform", subtitle_style))
     story.append(Spacer(1, 3 * mm))
+    story.append(HRFlowable(width="100%", thickness=2, color=NAVY, spaceAfter=4*mm))
 
-    # Cleaning steps
-    steps = clean.get("steps_applied", [])
-    if steps:
-        story.append(Paragraph("<b>Preprocessing Pipeline Execution:</b>", body_s))
-        for step in steps[:8]:
-            story.append(_bullet(step, accent))
+    badge_table = Table([[Paragraph(f"<b>ANALYSIS TYPE: {analysis_type}</b>", _style("Bdg", fontName="Helvetica-Bold", fontSize=10, textColor=WHITE, alignment=TA_CENTER))]], colWidths=["100%"])
+    badge_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), TEAL),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("PADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(badge_table)
+    story.append(Spacer(1, 6 * mm))
 
-    # ════════════════════════════════════════════════════════════════════════
-    # SECTION 3: ML MODEL PERFORMANCE & BENCHMARKS
-    # ════════════════════════════════════════════════════════════════════════
-    if ml and "error" not in ml:
-        story += _section("3. MACHINE LEARNING BENCHMARKS", accent)
-        is_reg = ml.get("problem_type") == "regression"
+    meta_info = [
+        ["Dataset Name:", filename],
+        ["Report Generated:", timestamp],
+        ["Target Variable:", str(insp.get("target_column") or "N/A")],
+        ["Best ML Algorithm:", str(ml.get("best_model") or "Auto-Selected Model")],
+        ["Validation Score:", f"AUC/R²: {ml.get('auc', ml.get('r2', 'N/A'))} | Accuracy: {ml.get('accuracy', 'N/A')}%"],
+    ]
+    meta_table = Table(
+        [[Paragraph(k, body_bold), Paragraph(v, body_style)] for k, v in meta_info],
+        colWidths=["35%", "65%"]
+    )
+    meta_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), LIGHT),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
+        ("PADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(meta_table)
+    story.append(Spacer(1, 10 * mm))
 
-        story.append(Paragraph(
-            f"Problem Formulation: <b>{ml.get('problem_type', 'N/A').title()}</b> | "
-            f"Best Champion: <b>{ml.get('best_model', 'N/A')}</b> | "
-            f"Training: <b>{ml.get('train_samples', 0):,}</b> samples | "
-            f"Evaluation: <b>{ml.get('test_samples', 0):,}</b> samples | "
-            f"Engineered Features: <b>{ml.get('n_features', 0)}</b>",
-            body_s,
-        ))
-
-        if is_reg:
-            model_rows = [
-                ["Model Candidate", "Metric Score", "Validation Status"],
-                ["Champion: " + str(ml.get("best_model", "N/A")), f"R² = {ml.get('r2_score','N/A')}", "Top Performer"],
-                ["Ridge Regression",  f"R² = {ml.get('lr_r2','N/A')}",  "Baseline"],
-                ["Random Forest",     f"R² = {ml.get('rf_r2','N/A')}",  "Ensemble"],
-                ["XGBoost Regressor", f"R² = {ml.get('xgb_r2','N/A')}", "Gradient Boosted"],
-                ["RMSE (Error)",      str(ml.get("rmse", "N/A")),       "Lower is better"],
-                ["Cross-Validation",  f"{ml.get('cv_mean','N/A')} ± {ml.get('cv_std','0')}", "5-Fold CV"],
-            ]
-        else:
-            model_rows = [
-                ["Model Candidate", "AUC Score", "Validation Status"],
-                ["Champion: " + str(ml.get("best_model", "N/A")), f"AUC = {ml.get('auc','N/A')}", "Top Performer"],
-                ["Logistic Regression", f"AUC = {ml.get('lr_auc','N/A')}",  "Linear"],
-                ["Random Forest",       f"AUC = {ml.get('rf_auc','N/A')}",  "Ensemble"],
-                ["XGBoost Classifier",  f"AUC = {ml.get('xgb_auc','N/A')}", "Gradient Boosted"],
-                ["Accuracy",            f"{ml.get('accuracy', 'N/A')}%",     "Overall Match"],
-                ["Cross-Validation",    f"{ml.get('cv_mean','N/A')} ± {ml.get('cv_std','0')}", "5-Fold CV"],
-            ]
-
-        ml_table = Table(model_rows, colWidths=["45%", "30%", "25%"])
-        ml_table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), accent),
-            ("TEXTCOLOR",  (0, 0), (-1, 0), WHITE),
-            ("FONTNAME",   (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE",   (0, 0), (-1, -1), 9),
-            ("ALIGN",      (0, 0), (-1, -1), "LEFT"),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [LIGHT, WHITE]),
-            ("GRID",       (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
-            ("PADDING",    (0, 0), (-1, -1), 5),
-        ]))
-        story.append(ml_table)
-        story.append(Spacer(1, 3 * mm))
-
-        # Top feature importance
-        fi = ml.get("feature_importance", {})
-        if fi:
-            story.append(Paragraph("<b>Key Drivers & Influential Signals:</b>", body_s))
-            fi_data = [["Rank", "Feature Variable", "Importance Weight"]]
-            for i, (feat, score) in enumerate(list(fi.items())[:8], 1):
-                fi_data.append([str(i), str(feat)[:35], f"{score:.4f}"])
-            fi_table = Table(fi_data, colWidths=["12%", "58%", "30%"])
-            fi_table.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), NAVY),
-                ("TEXTCOLOR",  (0, 0), (-1, 0), WHITE),
-                ("FONTNAME",   (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE",   (0, 0), (-1, -1), 8.5),
-                ("ALIGN",      (0, 0), (-1, -1), "LEFT"),
-                ("ALIGN",      (2, 0), (2, -1), "CENTER"),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [LIGHT, WHITE]),
-                ("GRID",       (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
-                ("PADDING",    (0, 0), (-1, -1), 4),
-            ]))
-            story.append(fi_table)
-
+    # Executive KPI Summary Tiles
+    kpi_data = [
+        [
+            Paragraph(f"<font size='15'><b>{insp.get('rows', 0):,}</b></font><br/><font color='#64748B'>Rows</font>", _style("K1", alignment=TA_CENTER)),
+            Paragraph(f"<font size='15'><b>{insp.get('columns', 0)}</b></font><br/><font color='#64748B'>Columns</font>", _style("K2", alignment=TA_CENTER)),
+            Paragraph(f"<font size='15'><b>{insp.get('missing_total', 0)}</b></font><br/><font color='#64748B'>Fixed Nulls</font>", _style("K3", alignment=TA_CENTER)),
+            Paragraph(f"<font size='15'><b>{insp.get('duplicates', 0)}</b></font><br/><font color='#64748B'>Duplicates</font>", _style("K4", alignment=TA_CENTER)),
+        ]
+    ]
+    kpi_t = Table(kpi_data, colWidths=["25%"]*4)
+    kpi_t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#EFF6FF")),
+        ("GRID", (0, 0), (-1, -1), 1, colors.HexColor("#BFDBFE")),
+        ("PADDING", (0, 0), (-1, -1), 10),
+    ]))
+    story.append(kpi_t)
     story.append(PageBreak())
 
     # ════════════════════════════════════════════════════════════════════════
-    # SECTION 4: VISUAL EDA CHARTS
+    # PAGE 2 — DATASET OVERVIEW
     # ════════════════════════════════════════════════════════════════════════
-    if chart_paths:
-        story += _section("4. EXPLORATORY DATA ANALYSIS (EDA CHARTS)", accent)
+    story.append(Paragraph("Dataset Overview & Profile", section_style))
+    story.append(HRFlowable(width="100%", thickness=1, color=TEAL, spaceAfter=3*mm))
 
-        chart_titles = [
-            "Feature Distributions",
-            "Feature Correlation Heatmap",
-            "Target Variable Distribution",
-            "Categorical Feature Impact",
-            "Numerical Distributions by Target",
-            "Domain-Specific Analysis",
-        ]
+    t_info = insp.get("target_info", {})
+    ov_data = [
+        ["Audit Metric", "Discovered Value"],
+        ["Total Row Count", f"{insp.get('rows', 0):,}"],
+        ["Total Column Count", str(insp.get("columns", 0))],
+        ["Numerical Feature Columns", f"{len(insp.get('numerical_cols', []))} ({', '.join(insp.get('numerical_cols', [])[:5])}...)"],
+        ["Categorical Feature Columns", f"{len(insp.get('categorical_cols', []))} ({', '.join(insp.get('categorical_cols', [])[:5])}...)"],
+        ["Identified High-Cardinality IDs", f"{len(insp.get('id_cols', []))} ({', '.join(insp.get('id_cols', [])) or 'None'})"],
+        ["Auto-Detected Target Column", f"{insp.get('target_column')} (Unique Values: {t_info.get('unique_count', 'N/A')})"],
+        ["Formulated Problem Type", str(insp.get("problem_type", "Classification")).title()],
+        ["Missing Cells / Null Values", f"{insp.get('missing_total', 0)} total across {len(insp.get('missing_cols', {}))} columns"],
+        ["Duplicate Row Records", f"{insp.get('duplicates', 0)} exact rows"],
+    ]
+    ov_tbl = Table([[Paragraph(c, table_cell_bold if i == 0 else table_cell) for c in row] for i, row in enumerate(ov_data)], colWidths=["38%", "62%"])
+    ov_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), NAVY),
+        ("TEXTCOLOR", (0, 0), (-1, 0), WHITE),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [WHITE, LIGHT]),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+        ("PADDING", (0, 0), (-1, -1), 4.5),
+    ]))
+    story.append(ov_tbl)
+    story.append(Spacer(1, 4 * mm))
 
-        valid_charts = [p for p in chart_paths if os.path.exists(p)]
-        for i, chart_path in enumerate(valid_charts):
-            title = chart_titles[i] if i < len(chart_titles) else f"Visual Insight {i+1}"
-            chart_block = []
-            chart_block.append(Paragraph(f"<b>Figure {i+1}: {title}</b>", body_s))
-            try:
-                img = Image(chart_path, width=170 * mm, height=88 * mm)
-                chart_block.append(img)
-                chart_block.append(Spacer(1, 4 * mm))
-                story.append(KeepTogether(chart_block))
-            except Exception:
-                pass
-
-    # ════════════════════════════════════════════════════════════════════════
-    # SECTION 5: STATISTICAL SUMMARY
-    # ════════════════════════════════════════════════════════════════════════
+    # Top Numerical Stats Table
     stats = insp.get("stats", {})
     if stats:
-        story.append(PageBreak())
-        story += _section("5. FEATURE STATISTICAL SUMMARY", accent)
-
-        stat_header = ["Feature", "Mean", "Median", "Std Dev", "Min", "Max", "Skewness"]
-        stat_data = [stat_header]
-        for col, vals in list(stats.items())[:15]:
-            stat_data.append([
-                str(col)[:22],
-                str(vals.get("mean", "—")),
-                str(vals.get("median", "—")),
-                str(vals.get("std", "—")),
-                str(vals.get("min", "—")),
-                str(vals.get("max", "—")),
-                str(vals.get("skewness", "—")),
+        story.append(Paragraph("Numerical Attributes Distribution Summary", _style("SubSec", fontSize=11, fontName="Helvetica-Bold", textColor=NAVY, spaceAfter=2*mm)))
+        st_data = [["Feature", "Mean", "Median", "Std Dev", "Min", "Max", "Skewness"]]
+        for col, s in list(stats.items())[:12]:
+            st_data.append([
+                str(col)[:20],
+                f"{s.get('mean', 0):.2f}",
+                f"{s.get('median', 0):.2f}",
+                f"{s.get('std', 0):.2f}",
+                f"{s.get('min', 0):.2f}",
+                f"{s.get('max', 0):.2f}",
+                f"{s.get('skewness', 0):.2f}",
             ])
-
-        stat_table = Table(stat_data, colWidths=["26%", "12%", "12%", "13%", "12%", "12%", "13%"])
-        stat_table.setStyle(TableStyle([
+        st_tbl = Table([[Paragraph(c, table_cell_bold if i == 0 else table_cell) for c in row] for i, row in enumerate(st_data)], colWidths=["28%", "12%", "12%", "12%", "12%", "12%", "12%"])
+        st_tbl.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), NAVY),
-            ("TEXTCOLOR",  (0, 0), (-1, 0), WHITE),
-            ("FONTNAME",   (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE",   (0, 0), (-1, -1), 8),
-            ("ALIGN",      (0, 0), (-1, -1), "CENTER"),
-            ("ALIGN",      (0, 0), (0, -1), "LEFT"),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [LIGHT, WHITE]),
-            ("GRID",       (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
-            ("PADDING",    (0, 0), (-1, -1), 4.5),
+            ("TEXTCOLOR", (0, 0), (-1, 0), WHITE),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [WHITE, LIGHT]),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+            ("PADDING", (0, 0), (-1, -1), 3.5),
         ]))
-        story.append(stat_table)
+        story.append(st_tbl)
+
+    story.append(PageBreak())
 
     # ════════════════════════════════════════════════════════════════════════
-    # FOOTER
+    # PAGE 3 — CLEANING REPORT
     # ════════════════════════════════════════════════════════════════════════
-    story.append(Spacer(1, 8 * mm))
-    story.append(_hr(GRAY, thickness=1))
-    story.append(Paragraph(
-        f"Generated by <b>AnchorIQ</b> — Autonomous Data Analysis Platform | {now}",
-        footer_s,
-    ))
+    story.append(Paragraph("Data Hygiene & Cleaning Report", section_style))
+    story.append(HRFlowable(width="100%", thickness=1, color=TEAL, spaceAfter=3*mm))
 
-    doc.build(story)
-    print(f"[OK] PDF report saved: {output_path}")
+    sh_data = [
+        ["Phase", "Dataset Dimensions", "Status"],
+        ["Original Raw Ingestion", f"{clean.get('original_shape', (0,0))[0]:,} rows × {clean.get('original_shape', (0,0))[1]} cols", "Ingested"],
+        ["Cleaned & Standardized", f"{clean.get('cleaned_shape', (0,0))[0]:,} rows × {clean.get('cleaned_shape', (0,0))[1]} cols", "Optimized"],
+        ["Residual Null Cells", f"{clean.get('nulls_remaining', 0)} nulls remaining", "Ready for ML"],
+    ]
+    sh_tbl = Table([[Paragraph(c, table_cell_bold if i == 0 else table_cell) for c in row] for i, row in enumerate(sh_data)], colWidths=["30%", "45%", "25%"])
+    sh_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), NAVY),
+        ("TEXTCOLOR", (0, 0), (-1, 0), WHITE),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [WHITE, LIGHT]),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+        ("PADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(sh_tbl)
+    story.append(Spacer(1, 5 * mm))
+
+    story.append(Paragraph("Automated Pipeline Steps Executed:", _style("StpHeader", fontSize=11, fontName="Helvetica-Bold", textColor=NAVY, spaceAfter=3*mm)))
+    steps = clean.get("steps_applied", [])
+    if steps:
+        step_rows = []
+        for idx, stp in enumerate(steps, 1):
+            step_rows.append([Paragraph(f"<b>Step {idx}</b>", table_cell_bold), Paragraph(f"✅ {stp}", table_cell)])
+        stp_tbl = Table(step_rows, colWidths=["15%", "85%"])
+        stp_tbl.setStyle(TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
+            ("ROWBACKGROUNDS", (0, 0), (-1, -1), [WHITE, LIGHT]),
+            ("PADDING", (0, 0), (-1, -1), 5),
+        ]))
+        story.append(stp_tbl)
+    else:
+        story.append(Paragraph("Dataset conformed to high quality thresholds upon arrival — zero transformations needed.", body_style))
+
+    story.append(PageBreak())
+
+    # ════════════════════════════════════════════════════════════════════════
+    # PAGES 4-5 — EDA CHARTS (2 charts per page)
+    # ════════════════════════════════════════════════════════════════════════
+    valid_charts = [p for p in chart_paths if os.path.exists(p)]
+    chart_names = [
+        "Feature Numerical Distributions",
+        "Feature Correlation Heatmap",
+        "Target Variable Distribution",
+        "Categorical Signals vs Target",
+        "Feature Boxplots by Target Class",
+        "Outlier Detection & IQR Boundaries",
+        "Missing Values Heatmap Matrix",
+        "Top Predictive Feature Importances",
+    ]
+
+    for idx, c_path in enumerate(valid_charts):
+        if idx % 2 == 0:
+            if idx > 0:
+                story.append(PageBreak())
+            page_num = 4 + (idx // 2)
+            story.append(Paragraph(f"Exploratory Data Analysis — Visual Insights (Part {idx//2 + 1})", section_style))
+            story.append(HRFlowable(width="100%", thickness=1, color=TEAL, spaceAfter=2*mm))
+
+        c_name = chart_names[idx] if idx < len(chart_names) else f"Visual Analysis Chart {idx+1}"
+        story.append(Paragraph(f"<b>Figure {idx+1}: {c_name}</b>", body_bold))
+        try:
+            img = Image(c_path, width=170 * mm, height=92 * mm)
+            story.append(img)
+            story.append(Paragraph(f"Chart automatically generated by AnchorIQ EDA Engine ({os.path.basename(c_path)})", caption_style))
+        except Exception as e:
+            story.append(Paragraph(f"[Image Rendering Failed: {e}]", body_style))
+        story.append(Spacer(1, 2 * mm))
+
+    story.append(PageBreak())
+
+    # ════════════════════════════════════════════════════════════════════════
+    # PAGE 6 — ML RESULTS
+    # ════════════════════════════════════════════════════════════════════════
+    story.append(Paragraph("Machine Learning Benchmarking & Performance", section_style))
+    story.append(HRFlowable(width="100%", thickness=1, color=TEAL, spaceAfter=3*mm))
+
+    is_reg = ml.get("problem_type") == "regression"
+    score_col_name = "R² Score" if is_reg else "ROC AUC"
+    best_name = ml.get("best_model", "Random Forest")
+
+    m_rows = [
+        ["Model Architecture", score_col_name, "Evaluation Status"],
+        ["Logistic Regression / Ridge", f"{ml.get('lr_score', 0):.4f}", "Baseline Linear"],
+        ["Random Forest (Ensemble)", f"{ml.get('rf_score', 0):.4f}", "Bagging Non-Linear"],
+        ["XGBoost (Gradient Boosted)", f"{ml.get('xgb_score', 0):.4f}", "Gradient Boosting"],
+    ]
+
+    tbl_rows = []
+    for i, r in enumerate(m_rows):
+        tbl_rows.append([Paragraph(c, table_cell_bold if i == 0 else table_cell) for c in r])
+    ml_tbl = Table(tbl_rows, colWidths=["45%", "25%", "30%"])
+
+    t_styles = [
+        ("BACKGROUND", (0, 0), (-1, 0), NAVY),
+        ("TEXTCOLOR", (0, 0), (-1, 0), WHITE),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [WHITE, LIGHT]),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+        ("PADDING", (0, 0), (-1, -1), 6),
+    ]
+
+    # Highlight best model row green
+    for idx_r, row in enumerate(m_rows[1:], 1):
+        if best_name.lower() in row[0].lower() or (best_name.lower().startswith("xgb") and "xgboost" in row[0].lower()):
+            t_styles.append(("BACKGROUND", (0, idx_r), (-1, idx_r), colors.HexColor("#D1FAE5")))
+            t_styles.append(("TEXTCOLOR", (0, idx_r), (-1, idx_r), colors.HexColor("#065F46")))
+
+    ml_tbl.setStyle(TableStyle(t_styles))
+    story.append(ml_tbl)
+    story.append(Spacer(1, 5 * mm))
+
+    # Details
+    details_data = [
+        ["Cross-Validation Mean (5-Fold)", f"{ml.get('cv_mean', 0):.4f} (± {ml.get('cv_std', 0):.4f})"],
+        ["Training / Test Sample Split", f"{ml.get('train_samples', 0):,} train / {ml.get('test_samples', 0):,} test"],
+        ["Engineered Feature Count", f"{ml.get('n_features', 0)} active dimensions"],
+        ["Optimal Decision Threshold", f"{ml.get('optimal_threshold', 0.5)} (Cost-optimized: FN=500, FP=50)" if not is_reg else "N/A (Continuous Regression)"],
+    ]
+    det_tbl = Table([[Paragraph(k, table_cell_bold), Paragraph(v, table_cell)] for k, v in details_data], colWidths=["45%", "55%"])
+    det_tbl.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
+        ("PADDING", (0, 0), (-1, -1), 4.5),
+        ("BACKGROUND", (0, 0), (-1, -1), LIGHT),
+    ]))
+    story.append(det_tbl)
+    story.append(Spacer(1, 5 * mm))
+
+    # Confusion Matrix
+    cm = ml.get("confusion_matrix", [])
+    if cm and len(cm) == 2:
+        story.append(Paragraph("Holdout Evaluation Confusion Matrix:", _style("CMH", fontSize=10, fontName="Helvetica-Bold", textColor=NAVY, spaceAfter=2*mm)))
+        cm_tbl_data = [
+            ["", "Predicted Negative (0)", "Predicted Positive (1)"],
+            ["Actual Negative (0)", f"TN: {cm[0][0]:,}", f"FP: {cm[0][1]:,}"],
+            ["Actual Positive (1)", f"FN: {cm[1][0]:,}", f"TP: {cm[1][1]:,}"],
+        ]
+        cm_tbl = Table([[Paragraph(c, table_cell_bold if (i == 0 or j == 0) else table_cell) for j, c in enumerate(r)] for i, r in enumerate(cm_tbl_data)], colWidths=["34%", "33%", "33%"])
+        cm_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), NAVY),
+            ("TEXTCOLOR", (0, 0), (-1, 0), WHITE),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+            ("ALIGN", (1, 1), (-1, -1), "CENTER"),
+            ("PADDING", (0, 0), (-1, -1), 5),
+        ]))
+        story.append(cm_tbl)
+
+    story.append(PageBreak())
+
+    # ════════════════════════════════════════════════════════════════════════
+    # PAGE 7 — AI INSIGHTS
+    # ════════════════════════════════════════════════════════════════════════
+    story.append(Paragraph("Strategic Business Intelligence & Insights", section_style))
+    story.append(HRFlowable(width="100%", thickness=1, color=TEAL, spaceAfter=4*mm))
+
+    if insights_text:
+        lines = insights_text.split("\n")
+        for line in lines:
+            line_str = line.strip()
+            if not line_str:
+                story.append(Spacer(1, 1.5 * mm))
+                continue
+            if line_str.startswith("## "):
+                sec_head = line_str[3:].strip()
+                story.append(Paragraph(f"<b>{sec_head}</b>", _style("AiHead", fontSize=12, fontName="Helvetica-Bold", textColor=NAVY, spaceBefore=3.5*mm, spaceAfter=1.5*mm)))
+            elif line_str.startswith("### "):
+                sub_head = line_str[4:].strip()
+                story.append(Paragraph(f"<b>{sub_head}</b>", _style("AiSub", fontSize=10, fontName="Helvetica-Bold", textColor=TEAL, spaceBefore=2*mm, spaceAfter=1*mm)))
+            elif line_str.startswith(("- ", "* ")):
+                bullet_text = line_str[2:].strip()
+                story.append(Paragraph(f"<font color='#0EA5E9'>&bull;</font> {bullet_text}", _style("AiBul", fontSize=9, fontName="Helvetica", textColor=DARK, leading=13, leftIndent=8)))
+            elif line_str[0].isdigit() and (line_str[1:3] in [". ", ") "]):
+                num_text = line_str[2:].strip() if line_str[1] in [".", ")"] else line_str[3:].strip()
+                num_idx = line_str.split()[0]
+                story.append(Paragraph(f"<b>{num_idx}</b> {num_text}", _style("AiNum", fontSize=9, fontName="Helvetica", textColor=DARK, leading=13, leftIndent=8)))
+            else:
+                story.append(Paragraph(line_str, body_style))
+    else:
+        story.append(Paragraph("AI-generated business analysis not available for this run.", body_style))
+
+    # Build PDF with custom NumberedCanvas
+    doc.build(story, canvasmaker=NumberedCanvas)
     return output_path

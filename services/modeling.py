@@ -1,36 +1,36 @@
-"""
-services/modeling.py  (v3)
-- Preprocessing lives INSIDE the saved pipeline, so the model can score brand-new raw data.
-- XGBoost is optional (falls back to HistGradientBoosting).
-- Leakage columns are removed before training.
-- Every row gets an honest (out-of-fold) prediction.
-- Importance = permutation importance on ORIGINAL columns (readable by humans).
-Returns (results_dict, scored_dataframe).
-"""
+"""Budget-aware supervised modeling with reproducible preprocessing and artifacts."""
+from __future__ import annotations
+
+import json
 import os
+import time
 import warnings
+from functools import partial
 
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.base import clone
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import (HistGradientBoostingClassifier, HistGradientBoostingRegressor,
-                              RandomForestClassifier, RandomForestRegressor)
+from sklearn.dummy import DummyClassifier, DummyRegressor
+from sklearn.ensemble import (
+    HistGradientBoostingClassifier, HistGradientBoostingRegressor,
+    RandomForestClassifier, RandomForestRegressor,
+)
 from sklearn.impute import SimpleImputer
-from sklearn.inspection import permutation_importance
 from sklearn.linear_model import LogisticRegression, Ridge
-from sklearn.metrics import (accuracy_score, classification_report, confusion_matrix,
-                             f1_score, mean_absolute_error, mean_squared_error,
-                             precision_recall_curve, precision_score, r2_score,
-                             recall_score, roc_auc_score)
-from sklearn.model_selection import (KFold, StratifiedKFold, cross_val_predict,
-                                     cross_val_score, train_test_split)
+from sklearn.metrics import (
+    accuracy_score, average_precision_score, brier_score_loss,
+    classification_report, confusion_matrix, mean_absolute_error,
+    roc_auc_score,
+)
+from sklearn.model_selection import (
+    KFold, StratifiedKFold, cross_val_score,
+    train_test_split,
+)
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
-
-from services.profiler import find_leakage
-
-warnings.filterwarnings("ignore")
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler, label_binarize
 
 try:
     from xgboost import XGBClassifier, XGBRegressor
@@ -38,287 +38,437 @@ try:
 except Exception:
     HAS_XGB = False
 
+try:
+    from lightgbm import LGBMClassifier, LGBMRegressor
+    HAS_LGBM = True
+except Exception:
+    HAS_LGBM = False
 
-def _log(msg):
-    try:
-        print(msg)
-    except Exception:
-        print(msg.encode("ascii", "replace").decode())
-
-
-def auto_model(df: pd.DataFrame, info: dict, save_path: str | None = "models/model.pkl"):
-    target = info["target"]
-    problem = info["problem_type"]
-    col_types = info["column_types"]
-    positive = info.get("positive_label")
-
-    d = df[df[target].notna()].copy()
-    if d[target].nunique() < 2:
-        return {"error": f"Target '{target}' has only one unique value."}, None
-    if len(d) < 30:
-        return {"error": f"Need at least 30 labelled rows (found {len(d)})."}, None
-
-    # ── leakage + feature selection ─────────────────────────────────────
-    leaks = find_leakage(d, target, col_types, problem)
-    skip_types = {"id", "text", "high_cardinality", "datetime"}
-    feat_num = [c for c in info["numeric_cols"] if c != target and c not in leaks]
-    feat_cat = [c for c in info["categorical_cols"] if c != target and c not in leaks]
-    X = d[feat_num + feat_cat].copy()
-
-    # datetime -> numeric parts
-    for c in [c for c, t in col_types.items() if t == "datetime" and c != target]:
-        X[f"{c}__year"] = d[c].dt.year
-        X[f"{c}__month"] = d[c].dt.month
-        X[f"{c}__dayofweek"] = d[c].dt.dayofweek
-        feat_num += [f"{c}__year", f"{c}__month", f"{c}__dayofweek"]
-    for c in feat_cat:
-        X[c] = X[c].astype(str)
-    if X.shape[1] == 0:
-        return {"error": "No usable feature columns after preprocessing."}, None
-
-    # ── target encoding ─────────────────────────────────────────────────
-    classes = None
-    if problem == "classification":
-        classes = sorted(d[target].astype(str).unique())
-        if len(classes) == 2:
-            pos = str(positive) if positive is not None else classes[-1]
-            y = (d[target].astype(str) == pos).astype(int)
-        else:
-            pos = None
-            y = pd.Series(pd.Categorical(d[target].astype(str), categories=classes).codes, index=d.index)
-    else:
-        pos = None
-        y = pd.to_numeric(d[target], errors="coerce")
-        keep = y.notna()
-        X, y, d = X[keep], y[keep], d[keep]
-        # extreme outliers would dominate the error and hide real patterns: clip for TRAINING/EVALUATION only
-        lo, hi = y.quantile(0.005), y.quantile(0.995)
-        n_out = int(((y < lo) | (y > hi)).sum())
-        y_raw_std = float(y.std() or 1)
-        y_clip = y.clip(lo, hi)
-        outlier_note = None
-        if n_out and abs(float(y_clip.std()) - y_raw_std) / y_raw_std > 0.3:
-            y = y_clip
-            outlier_note = (f"{n_out} extreme values of {target} (outside {lo:,.4g} to {hi:,.4g}) were capped "
-                            f"before training so they would not distort the model.")
-    is_binary = problem == "classification" and len(classes) == 2
-    outlier_note = locals().get("outlier_note")
-
-    pre = ColumnTransformer([
-        ("num", Pipeline([("imp", SimpleImputer(strategy="median")), ("sc", StandardScaler())]),
-         [c for c in X.columns if c not in feat_cat]),
-        ("cat", Pipeline([("imp", SimpleImputer(strategy="most_frequent")),
-                          ("oh", OneHotEncoder(handle_unknown="ignore", min_frequency=0.01,
-                                               sparse_output=False))]), feat_cat),
-    ])
-
-    candidates = _candidates(problem, is_binary)
-    scoring = ("roc_auc" if is_binary else "f1_macro") if problem == "classification" else "r2"
-    cv_split = (StratifiedKFold(3, shuffle=True, random_state=42) if problem == "classification"
-                else KFold(3, shuffle=True, random_state=42))
-
-    # model selection on a sample for speed
-    if len(X) > 20000:
-        idx = X.sample(20000, random_state=42).index
-        Xs, ys = X.loc[idx], y.loc[idx]
-    else:
-        Xs, ys = X, y
-
-    leaderboard = []
-    for name, est in candidates.items():
-        pipe = Pipeline([("pre", pre), ("model", est)])
-        try:
-            sc = cross_val_score(pipe, Xs, ys, cv=cv_split, scoring=scoring)
-            leaderboard.append({"model": name, "cv_mean": round(float(sc.mean()), 4),
-                                "cv_std": round(float(sc.std()), 4), "_est": est})
-        except Exception as e:
-            _log(f"[WARN] {name} failed: {e}")
-    if not leaderboard:
-        return {"error": "All candidate models failed to train."}, None
-    leaderboard.sort(key=lambda r: r["cv_mean"], reverse=True)
-    best = leaderboard[0]
-    best_name, best_est = best["model"], best["_est"]
-    _log(f"  Best model: {best_name} ({scoring}={best['cv_mean']})")
-
-    # ── hold-out evaluation ─────────────────────────────────────────────
-    stratify = y if problem == "classification" and y.value_counts().min() >= 2 else None
-    X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42, stratify=stratify)
-    pipe = Pipeline([("pre", pre), ("model", best_est)]).fit(X_tr, y_tr)
-
-    results = {
-        "problem_type": problem, "best_model": best_name, "scoring": scoring,
-        "cv_mean": best["cv_mean"], "cv_std": best["cv_std"],
-        "train_samples": len(X_tr), "test_samples": len(X_te), "n_features": X.shape[1],
-        "features_used": list(X.columns),
-        "dropped_for_leakage": leaks,
-        "leaderboard": [{k: v for k, v in r.items() if k != "_est"} for r in leaderboard],
-        "has_xgboost": HAS_XGB,
-        "outlier_note": outlier_note,
-    }
-    scored = d.copy()
-
-    if problem == "classification":
-        pred = pipe.predict(X_te)
-        results.update({
-            "classes": classes, "positive_label": pos,
-            "accuracy": round(float(accuracy_score(y_te, pred)) * 100, 2),
-            "f1_score": round(float(f1_score(y_te, pred, average="binary" if is_binary else "weighted")), 4),
-            "precision": round(float(precision_score(y_te, pred, average="binary" if is_binary else "weighted", zero_division=0)), 4),
-            "recall": round(float(recall_score(y_te, pred, average="binary" if is_binary else "weighted", zero_division=0)), 4),
-            "baseline_accuracy": round(float(y_te.value_counts(normalize=True).max()) * 100, 2),
-            "confusion_matrix": confusion_matrix(y_te, pred).tolist(),
-            "report": classification_report(y_te, pred, output_dict=True, zero_division=0),
-        })
-        try:
-            proba = pipe.predict_proba(X_te)
-            results["auc"] = round(float(roc_auc_score(y_te, proba[:, 1]) if is_binary
-                                         else roc_auc_score(y_te, proba, multi_class="ovr")), 4)
-        except Exception:
-            results["auc"] = results["cv_mean"]
-
-        # honest out-of-fold prediction for every row
-        oof = _oof(pipe, X, y, cv_split, "predict_proba")
-        if is_binary:
-            p = oof[:, 1]
-            thr = _best_threshold(y, p)
-            results["threshold"] = round(thr, 3)
-            pred_all = (p >= thr).astype(int)
-            results["oof_precision"] = round(float(precision_score(y, pred_all, zero_division=0)), 4)
-            results["oof_recall"] = round(float(recall_score(y, pred_all, zero_division=0)), 4)
-            scored[f"predicted_{target}"] = np.where(pred_all == 1, pos, [c for c in classes if c != pos][0])
-            scored["prediction_score"] = np.round(p, 4)
-            scored["risk_tier"] = pd.cut(p, [-0.01, 0.3, 0.6, 1.01], labels=["Low", "Medium", "High"]).astype(str)
-        else:
-            scored[f"predicted_{target}"] = [classes[i] for i in oof.argmax(axis=1)]
-            scored["prediction_score"] = np.round(oof.max(axis=1), 4)
-    else:
-        pred = pipe.predict(X_te)
-        rmse = float(np.sqrt(mean_squared_error(y_te, pred)))
-        results.update({
-            "r2_score": round(float(r2_score(y_te, pred)), 4),
-            "rmse": round(rmse, 4), "mae": round(float(mean_absolute_error(y_te, pred)), 4),
-            "baseline_rmse": round(float(np.sqrt(np.mean((y_te - y_tr.mean()) ** 2))), 4),
-        })
-        oof = _oof(pipe, X, y, cv_split, "predict")
-        scored[f"predicted_{target}"] = np.round(oof, 4)
-        scored["prediction_error"] = np.round(oof - y.values, 4)
-
-    # tournament keys expected by the existing UI/PDF
-    for key, names in {"lr": ("Logistic Regression", "Ridge Regression"),
-                       "rf": ("Random Forest",),
-                       "xgb": ("XGBoost", "Gradient Boosting")}.items():
-        m = next((r for r in leaderboard if r["model"] in names), None)
-        suffix = "r2" if problem == "regression" else "auc"
-        results[f"{key}_{suffix}"] = m["cv_mean"] if m else 0
-
-    # ── readable importance (original columns) ──────────────────────────
-    results["feature_importance"] = _importance(pipe, X_te, y_te, scoring)
-
-    # ── final model on all data, saved for future raw data ─────────────
-    final = Pipeline([("pre", pre), ("model", best_est)]).fit(X, y)
-    if save_path:
-        try:
-            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-            joblib.dump({"pipeline": final, "features": list(X.columns), "target": target,
-                         "problem_type": problem, "classes": classes, "positive_label": pos,
-                         "threshold": results.get("threshold")}, save_path)
-            results["model_path"] = save_path
-        except Exception as e:
-            _log(f"[WARN] could not save model: {e}")
-    return results, scored
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 
 
-# ── helpers ───────────────────────────────────────────────────────────────
-def _candidates(problem, is_binary):
-    if problem == "classification":
-        c = {
-            "Logistic Regression": LogisticRegression(max_iter=2000, class_weight="balanced"),
-            "Random Forest": RandomForestClassifier(n_estimators=200, max_depth=12, min_samples_leaf=3,
-                                                    class_weight="balanced_subsample", n_jobs=-1, random_state=42),
+def _build_preprocessor(numeric_cols: list[str], categorical_cols: list[str]) -> ColumnTransformer:
+    transformers = []
+    if numeric_cols:
+        numeric = Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
+        ])
+        transformers.append(("numeric", numeric, numeric_cols))
+    if categorical_cols:
+        categorical = Pipeline([
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
+        ])
+        transformers.append(("categorical", categorical, categorical_cols))
+    return ColumnTransformer(transformers=transformers, remainder="drop")
+
+
+def _schema_for(X: pd.DataFrame, numeric_cols: list[str], categorical_cols: list[str]) -> dict:
+    columns = {}
+    for col in numeric_cols:
+        vals = pd.to_numeric(X[col], errors="coerce").dropna()
+        columns[col] = {
+            "type": str(X[col].dtype),
+            "kind": "numeric",
+            "min": float(vals.min()) if len(vals) else None,
+            "max": float(vals.max()) if len(vals) else None,
         }
-        if HAS_XGB:
-            eval_metric = "logloss" if is_binary else "mlogloss"
-            c["XGBoost"] = XGBClassifier(n_estimators=250, max_depth=4, learning_rate=0.06, subsample=0.9,
-                                         colsample_bytree=0.8, eval_metric=eval_metric, verbosity=0, random_state=42)
-        else:
-            c["Gradient Boosting"] = HistGradientBoostingClassifier(max_depth=4, learning_rate=0.06,
-                                                                    max_iter=250, random_state=42)
-        return c
-    c = {
-        "Ridge Regression": Ridge(alpha=1.0),
-        "Random Forest": RandomForestRegressor(n_estimators=200, max_depth=14, min_samples_leaf=3,
-                                               n_jobs=-1, random_state=42),
+    for col in categorical_cols:
+        categories = [str(v) for v in X[col].dropna().unique().tolist()]
+        columns[col] = {
+            "type": str(X[col].dtype),
+            "kind": "categorical",
+            "allowed_categories": sorted(categories),
+        }
+    return {
+        "column_names": list(X.columns),
+        "columns": columns,
+        "numeric_cols": numeric_cols,
+        "categorical_cols": categorical_cols,
     }
-    if HAS_XGB:
-        c["XGBoost"] = XGBRegressor(n_estimators=300, max_depth=4, learning_rate=0.06, subsample=0.9,
-                                    colsample_bytree=0.8, verbosity=0, random_state=42)
-    else:
-        c["Gradient Boosting"] = HistGradientBoostingRegressor(max_depth=4, learning_rate=0.06,
-                                                               max_iter=300, random_state=42)
-    return c
 
 
-def _oof(pipe, X, y, cv, method):
-    from sklearn.base import clone
-    if len(X) > 150_000:  # too slow: fall back to in-sample
-        return getattr(pipe, method)(X)
-    return cross_val_predict(clone(pipe), X, y, cv=cv, method=method)
+def _detect_leakage(X: pd.DataFrame, y: pd.Series, is_classification: bool) -> list[str]:
+    issues = []
+    y_values = np.asarray(y)
+    for col in X.columns:
+        feature = X[col]
+        valid = feature.notna()
+        if int(valid.sum()) < 10:
+            continue
+        # Catch exact copies and inverted/encoded copies regardless of feature dtype.
+        try:
+            left = feature.loc[valid].astype(str).to_numpy()
+            right = pd.Series(y, index=X.index).loc[valid].astype(str).to_numpy()
+            if np.mean(left == right) > 0.98:
+                issues.append(f"Feature '{col}' is a near-duplicate of the target (>0.98 exact agreement). Possible leakage.")
+                continue
+        except Exception:
+            pass
+        if pd.api.types.is_numeric_dtype(feature):
+            pair = pd.DataFrame({"x": pd.to_numeric(feature, errors="coerce"), "y": y}, index=X.index).dropna()
+            if len(pair) >= 10 and pair["x"].nunique() > 1 and pair["y"].nunique() > 1:
+                corr = abs(float(pair["x"].corr(pair["y"])))
+                if np.isfinite(corr) and corr > 0.98:
+                    issues.append(f"Feature '{col}' has absolute target correlation {corr:.4f} (>0.98). Possible leakage.")
+        if is_classification and len(np.unique(y_values)) == 2:
+            try:
+                if pd.api.types.is_numeric_dtype(feature):
+                    encoded = pd.to_numeric(feature, errors="coerce").fillna(feature.median())
+                    auc = float(roc_auc_score(y_values, encoded))
+                    auc = max(auc, 1.0 - auc)
+                else:
+                    labels = feature.astype("string").fillna("__MISSING__")
+                    auc = max(
+                        max(float(roc_auc_score(y_values, (labels == category).astype(int))),
+                            1.0 - float(roc_auc_score(y_values, (labels == category).astype(int))))
+                        for category in labels.unique()
+                    )
+                if auc > 0.98:
+                    issues.append(f"Feature '{col}' has single-feature AUC {auc:.4f} (>0.98). Possible leakage.")
+            except Exception:
+                pass
+    return list(dict.fromkeys(issues))
 
 
-def _best_threshold(y, p):
-    prec, rec, thr = precision_recall_curve(y, p)
-    f1 = 2 * prec * rec / np.maximum(prec + rec, 1e-9)
-    i = int(np.nanargmax(f1[:-1])) if len(thr) else 0
-    return float(thr[i]) if len(thr) else 0.5
-
-
-def _importance(pipe, X_te, y_te, scoring):
+def _safe_score(estimator, X, y, cv, scoring) -> tuple[list[float], str | None]:
     try:
-        if len(X_te) > 2000:
-            idx = X_te.sample(2000, random_state=1).index
-            X_te, y_te = X_te.loc[idx], y_te.loc[idx]
-        pi = permutation_importance(pipe, X_te, y_te, scoring=scoring, n_repeats=3,
-                                    random_state=42, n_jobs=1)
-        imp = np.clip(pi.importances_mean, 0, None)
-        total = imp.sum()
-        if total <= 0:
-            return {}
-        imp = imp / total
-        order = np.argsort(imp)[::-1][:15]
-        return {str(X_te.columns[i]): round(float(imp[i]), 4) for i in order if imp[i] > 0}
-    except Exception as e:
-        _log(f"[WARN] importance failed: {e}")
-        return {}
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            values = cross_val_score(estimator, X, y, cv=cv, scoring=scoring, n_jobs=1, error_score="raise")
+        finite = [float(v) for v in values if np.isfinite(v)]
+        if finite:
+            return finite, None
+        return [], "Cross-validation produced no finite scores."
+    except Exception as exc:
+        return [], str(exc)
 
 
-def predict_new(model_path: str, new_df: pd.DataFrame) -> pd.DataFrame:
-    """Score brand-new raw data with a saved model."""
-    bundle = joblib.load(model_path)
-    X = new_df.copy()
-    for col in list(X.columns):
-        if pd.api.types.is_datetime64_any_dtype(X[col]) or any(f"{col}__{part}" in bundle["features"] for part in ("year", "month", "dayofweek")):
-            dt_s = pd.to_datetime(X[col], errors="coerce")
-            X[f"{col}__year"] = dt_s.dt.year
-            X[f"{col}__month"] = dt_s.dt.month
-            X[f"{col}__dayofweek"] = dt_s.dt.dayofweek
-    X_feat = X.reindex(columns=bundle["features"])
-    out = new_df.copy()
-    pipe = bundle["pipeline"]
-    if bundle["problem_type"] == "classification":
-        if bundle.get("classes") and len(bundle["classes"]) == 2:
-            p = pipe.predict_proba(X_feat)[:, 1]
-            pos = bundle.get("positive_label") or bundle["classes"][1]
-            neg = [c for c in bundle["classes"] if str(c) != str(pos)][0] if len(bundle["classes"]) == 2 else bundle["classes"][0]
-            thr = bundle.get("threshold", 0.5) or 0.5
-            out[f"predicted_{bundle['target']}"] = np.where(p >= thr, pos, neg)
-            out["prediction_score"] = np.round(p, 4)
-            out["risk_tier"] = pd.cut(p, [-0.01, 0.3, 0.6, 1.01], labels=["Low", "Medium", "High"]).astype(str)
-        else:
-            oof = pipe.predict_proba(X_feat)
-            classes = bundle.get("classes", [])
-            out[f"predicted_{bundle['target']}"] = [classes[i] if i < len(classes) else str(i) for i in oof.argmax(axis=1)]
-            out["prediction_score"] = np.round(oof.max(axis=1), 4)
+def _macro_average_precision(estimator, X, y) -> float:
+    """Macro one-vs-rest average precision for imbalanced multiclass targets."""
+    probabilities = estimator.predict_proba(X)
+    classes = np.asarray(estimator.classes_)
+    truth = label_binarize(y, classes=classes)
+    if truth.shape[1] != probabilities.shape[1]:
+        raise ValueError("Class probability columns do not match validation labels.")
+    return float(average_precision_score(truth, probabilities, average="macro"))
+
+
+def _minority_average_precision(estimator, X, y, positive_label) -> float:
+    probabilities = estimator.predict_proba(X)
+    class_index = list(estimator.classes_).index(positive_label)
+    return float(average_precision_score(np.asarray(y) == positive_label, probabilities[:, class_index]))
+
+
+def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
+               save_dir: str = "models", session_id: str = "default") -> dict:
+    """Compare and persist models while retaining the legacy response contract."""
+    started = time.monotonic()
+    os.makedirs(save_dir, exist_ok=True)
+    try:
+        budget = max(1.0, float(os.getenv("MODEL_TIME_BUDGET", "60").strip()))
+    except (TypeError, ValueError):
+        budget = 60.0
+
+    if not target or target not in df.columns:
+        return {"error": f"Target column '{target}' not present in dataframe."}
+    data = df.dropna(subset=[target]).copy()
+    if len(data) < 15:
+        return {"error": f"Insufficient sample size ({len(data)} rows) for supervised modeling."}
+    if data[target].nunique() < 2:
+        return {"error": f"Target column '{target}' has only 1 unique value. Modeling requires at least 2 distinct classes or variance."}
+
+    is_classification = data[target].nunique() <= 10
+    problem_type = "classification" if is_classification else "regression"
+    if is_classification:
+        label_encoder = LabelEncoder()
+        y = pd.Series(label_encoder.fit_transform(data[target].astype(str)), index=data.index)
+        classes = [str(v) for v in label_encoder.classes_]
     else:
-        out[f"predicted_{bundle['target']}"] = np.round(pipe.predict(X_feat), 4)
-    return out
+        y = pd.to_numeric(data[target], errors="coerce")
+        valid = y.notna()
+        data, y = data.loc[valid], y.loc[valid]
+        classes = None
 
+    features = [c for c in data.columns if c != target]
+    features = [c for c in features if not (
+        any(c.lower().endswith(suffix) or c.lower() == suffix for suffix in ("id", "uuid", "guid", "key"))
+        and data[c].nunique() / max(len(data), 1) > 0.6
+    )]
+    if not features:
+        return {"error": "No valid predictor features available for training."}
+
+    X = data[features].copy()
+    leakage_warnings = _detect_leakage(X, y, is_classification)
+    numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    categorical_cols = [c for c in X.columns if c not in numeric_cols]
+    schema = _schema_for(X, numeric_cols, categorical_cols)
+    subsampled = len(X) > 50000
+    if subsampled:
+        X_search, _, y_search, _ = train_test_split(
+            X, y, train_size=50000, random_state=42,
+            stratify=y if is_classification else None,
+        )
+    else:
+        X_search, y_search = X, y
+
+    if is_classification:
+        minority = float(y.value_counts(normalize=True).min())
+        use_pr = minority < 0.20
+        metric = "PR-AUC" if use_pr else "ROC-AUC"
+        metric_reason = (f"Minority class is {minority:.1%}, below 20%; average precision emphasizes positive-class retrieval."
+                        if use_pr else f"Minority class is {minority:.1%}; ROC-AUC is used because no binary class is below 20%." )
+        scoring = (partial(_minority_average_precision, positive_label=y.value_counts().idxmin())
+               if len(classes) == 2 else _macro_average_precision) if use_pr else (
+            "roc_auc" if len(classes) == 2 else "roc_auc_ovr_weighted"
+        )
+        if use_pr and len(classes) > 2:
+            metric_reason = f"Smallest class is {minority:.1%}, below 20%; macro one-vs-rest average precision is used for multiclass imbalance."
+        min_class = int(y_search.value_counts().min())
+        folds = min(5, min_class)
+        if folds < 2:
+            return {"error": "At least two examples per class are required for stratified cross-validation."}
+        cv = StratifiedKFold(n_splits=folds, shuffle=True, random_state=42)
+        baseline_estimator = DummyClassifier(strategy="prior")
+    else:
+        metric, scoring = "R2", "r2"
+        metric_reason = "R2 measures explained variance for a continuous target; MAE is reported as a complementary error scale."
+        folds = min(5, max(2, len(y_search) // 3))
+        cv = KFold(n_splits=folds, shuffle=True, random_state=42)
+        baseline_estimator = DummyRegressor(strategy="mean")
+
+    preprocessor = _build_preprocessor(numeric_cols, categorical_cols)
+    candidates = []
+    if is_classification:
+        candidates = [
+            ("Logistic Regression", LogisticRegression(max_iter=800, class_weight="balanced", random_state=42)),
+            ("HistGradientBoosting", HistGradientBoostingClassifier(max_iter=60, class_weight="balanced", random_state=42)),
+            ("Random Forest", RandomForestClassifier(n_estimators=50, min_samples_leaf=2, class_weight="balanced", n_jobs=1, random_state=42)),
+        ]
+        if HAS_LGBM:
+            candidates.append(("LightGBM", LGBMClassifier(n_estimators=60, class_weight="balanced", verbosity=-1, n_jobs=1, random_state=42)))
+        if HAS_XGB:
+            weight = float((y == 0).sum() / max((y == 1).sum(), 1)) if len(classes) == 2 else 1.0
+            candidates.append(("XGBoost", XGBClassifier(n_estimators=40, max_depth=4, learning_rate=0.08, scale_pos_weight=weight, eval_metric="logloss", verbosity=0, n_jobs=1, random_state=42)))
+        stage1_names = {"Logistic Regression"}
+    else:
+        candidates = [
+            ("Ridge", Ridge()),
+            ("HistGradientBoosting", HistGradientBoostingRegressor(max_iter=60, random_state=42)),
+            ("Random Forest", RandomForestRegressor(n_estimators=50, min_samples_leaf=2, n_jobs=1, random_state=42)),
+        ]
+        if HAS_LGBM:
+            candidates.append(("LightGBM", LGBMRegressor(n_estimators=60, verbosity=-1, n_jobs=1, random_state=42)))
+        if HAS_XGB:
+            candidates.append(("XGBoost", XGBRegressor(n_estimators=40, max_depth=4, learning_rate=0.08, objective="reg:squarederror", verbosity=0, n_jobs=1, random_state=42)))
+        stage1_names = {"Ridge"}
+
+    # Stage 1: baseline and inexpensive models; all CV is five-fold when class counts permit.
+    cv_results = {}
+    baseline_pipe = Pipeline([("preprocessor", clone(preprocessor)), ("model", baseline_estimator)])
+    baseline_scores, baseline_error = _safe_score(baseline_pipe, X_search, y_search, cv, scoring)
+    baseline_mean = float(np.mean(baseline_scores)) if baseline_scores else (0.5 if is_classification and metric == "ROC-AUC" else (minority if is_classification else 0.0))
+    cv_results["Baseline"] = {"mean": round(baseline_mean, 4), "std": round(float(np.std(baseline_scores)), 4) if baseline_scores else 0.0}
+    if baseline_error:
+        cv_results["Baseline"]["error"] = baseline_error
+
+    fitted_candidates = {}
+    best_name, best_pipe, best_score = None, None, -float("inf")
+    notes = []
+
+    def remaining():
+        return budget - (time.monotonic() - started)
+
+    def evaluate(name, estimator, X_eval=X_search, y_eval=y_search, fold=cv):
+        nonlocal best_name, best_pipe, best_score
+        pipe = Pipeline([("preprocessor", clone(preprocessor)), ("model", clone(estimator))])
+        scores, error = _safe_score(pipe, X_eval, y_eval, fold, scoring)
+        if error:
+            cv_results[name] = {"error": error}
+            return None
+        mean = float(np.mean(scores))
+        cv_results[name] = {"mean": round(mean, 4), "std": round(float(np.std(scores)), 4)}
+        fitted_candidates[name] = (pipe, mean)
+        if mean > best_score:
+            best_name, best_pipe, best_score = name, pipe, mean
+        return mean
+
+    fast = [(n, e) for n, e in candidates if n in stage1_names]
+    heavy = [(n, e) for n, e in candidates if n not in stage1_names]
+    for name, estimator in fast:
+        if remaining() <= max(2.0, budget * 0.04):
+            cv_results[name] = {"skipped": "time budget reserve reached"}
+            notes.append(f"{name} skipped to preserve time for final fitting and artifact saving.")
+            continue
+        evaluate(name, estimator)
+    # Stage 2 only starts when a useful reserve remains; errors never abort other trials.
+    if remaining() > max(34.0, budget * 0.58):
+        for name, estimator in heavy:
+            if remaining() <= max(27.0, budget * 0.46):
+                cv_results[name] = {"skipped": "time budget reserve reached"}
+                continue
+            evaluate(name, estimator)
+    else:
+        for name, _ in heavy:
+            cv_results[name] = {"skipped": "Stage 2 omitted: insufficient time remains."}
+
+    if best_pipe is None:
+        best_name, best_pipe, best_score = "Baseline", baseline_pipe, baseline_mean
+
+    if not np.isfinite(best_score):
+        best_score = baseline_mean
+        best_name, best_pipe = "Baseline", baseline_pipe
+
+    # Fit the chosen complete pipeline on all available data, then calibrate if time allows.
+    brier = None
+    calibrated_pipe = best_pipe
+    try:
+        if remaining() > max(1.0, budget * 0.05):
+            best_pipe.fit(X, y)
+        else:
+            notes.append("Full-data refit began at the end of the time budget.")
+            best_pipe.fit(X, y)
+        if is_classification:
+            min_count = int(y.value_counts().min())
+            cal_folds = min(3, min_count)
+            if cal_folds >= 2 and remaining() > max(7.0, budget * 0.12):
+                try:
+                    try:
+                        calibrator = CalibratedClassifierCV(estimator=clone(best_pipe), cv=cal_folds)
+                    except TypeError:
+                        calibrator = CalibratedClassifierCV(base_estimator=clone(best_pipe), cv=cal_folds)
+                    calibrator.fit(X, y)
+                    calibrated_pipe = calibrator
+                    probs = calibrated_pipe.predict_proba(X)
+                    if len(classes) == 2:
+                        brier = round(float(brier_score_loss(y, probs[:, 1])), 4)
+                    else:
+                        brier = round(float(np.mean([brier_score_loss((y == i).astype(int), probs[:, i]) for i in range(len(classes))])), 4)
+                except Exception as exc:
+                    notes.append(f"Probability calibration failed; using the uncalibrated fitted pipeline ({exc}).")
+            else:
+                notes.append("Calibration skipped because the remaining time or class count was insufficient.")
+    except Exception as exc:
+        # A failed selected estimator must not hide a valid fallback.
+        notes.append(f"Winner refit failed ({exc}); fitting the baseline instead.")
+        best_name = "Baseline"
+        best_pipe = Pipeline([("preprocessor", clone(preprocessor)), ("model", clone(baseline_estimator))]).fit(X, y)
+        calibrated_pipe = best_pipe
+        best_score = baseline_mean
+
+    # Holdout reporting retains existing response fields; CV remains the selection criterion.
+    stratify = y if is_classification and int(y.value_counts().min()) >= 2 else None
+    try:
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=stratify)
+    except Exception:
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    try:
+        test_preds = best_pipe.predict(X_test)
+    except Exception:
+        test_preds = np.repeat(y_train.mode().iloc[0] if is_classification else y_train.mean(), len(y_test))
+    cm, report, threshold, min_cost = [], {}, 0.5, 0
+    if is_classification:
+        cm = confusion_matrix(y_test, test_preds).tolist()
+        report = classification_report(y_test, test_preds, output_dict=True, zero_division=0)
+        try:
+            probs = calibrated_pipe.predict_proba(X_test)
+            positive_probs = probs[:, 1] if len(classes) == 2 else probs.max(axis=1)
+            if len(classes) == 2:
+                costs = []
+                for candidate_threshold in np.arange(0.1, 0.95, 0.05):
+                    decisions = (positive_probs >= candidate_threshold).astype(int)
+                    fn = int(np.sum((y_test == 1) & (decisions == 0)))
+                    fp = int(np.sum((y_test == 0) & (decisions == 1)))
+                    costs.append((fn * 500 + fp * 50, candidate_threshold))
+                min_cost, threshold = min(costs, key=lambda item: item[0])
+                threshold = round(float(threshold), 2)
+        except Exception:
+            pass
+    mae = None
+    if not is_classification:
+        try:
+            mae = round(float(mean_absolute_error(y_test, test_preds)), 4)
+        except Exception:
+            pass
+
+    baseline_spread = cv_results["Baseline"]["std"]
+    margin = best_score - baseline_mean
+    best_spread = cv_results.get(best_name, {}).get("std", 0.0)
+    noise_floor = max(0.10, 2.0 * max(float(best_spread or 0.0), float(baseline_spread or 0.0)))
+    verdict = "strong" if margin >= max(0.15, 3.0 * float(best_spread or 0.0)) else (
+        "moderate" if margin >= noise_floor else "weak: barely beats baseline"
+    )
+    if best_name == "Baseline" or margin < 0:
+        verdict = "weak: barely beats baseline"
+    why_won = (f"Highest cross-validated {metric} ({best_score:.4f}); improvement over baseline is {margin:+.4f}."
+               if best_name != "Baseline" else "No non-baseline candidate produced a better valid cross-validation score.")
+
+    importance = {}
+    try:
+        model = best_pipe.named_steps.get("model")
+        if model is not None:
+            prep = best_pipe.named_steps["preprocessor"]
+            names = [name.split("__", 1)[-1] for name in prep.get_feature_names_out()]
+            values = getattr(model, "feature_importances_", None)
+            if values is None and hasattr(model, "coef_"):
+                coef = np.asarray(model.coef_)
+                values = np.abs(coef[0] if coef.ndim > 1 else coef)
+            if values is not None:
+                importance = {k: round(float(v), 4) for k, v in sorted(zip(names, values), key=lambda x: x[1], reverse=True)[:10]}
+    except Exception:
+        pass
+
+    for warning_text in leakage_warnings:
+        notes.insert(0, warning_text)
+    model_card = {
+        "dataset_size": int(len(X)), "features_used": list(X.columns),
+        "models_tried": list(cv_results.keys()), "cv_scores": cv_results,
+        "baseline": {"mean": round(baseline_mean, 4), "std": baseline_spread},
+        "baseline_score": round(baseline_mean, 4), "metric": metric,
+        "metric_reason": metric_reason, "winner": best_name,
+        "winning_score": round(float(best_score), 4), "why_it_won": why_won,
+        "brier_score": brier, "mae": mae,
+        "time_used_seconds": round(time.monotonic() - started, 2),
+        "time_budget_seconds": budget, "subsampled": subsampled,
+        "warnings": notes, "reliability_verdict": verdict,
+    }
+    model_path = os.path.join(save_dir, f"{session_id}_model.pkl")
+    schema_path = os.path.join(save_dir, f"{session_id}_schema.json")
+    try:
+        joblib.dump({
+            "pipeline": calibrated_pipe, "raw_pipeline": best_pipe,
+            "features": list(X.columns), "numeric_cols": numeric_cols,
+            "categorical_cols": categorical_cols, "target": target,
+            "problem_type": problem_type, "threshold": threshold,
+            "classes": classes, "analysis_type": analysis_type,
+            "schema": schema, "model_card": model_card,
+        }, model_path)
+        with open(schema_path, "w", encoding="utf-8") as file:
+            json.dump(schema, file, indent=2, ensure_ascii=False)
+    except Exception as exc:
+        notes.append(f"Could not save model artifact or schema: {exc}")
+
+    lr_score = cv_results.get("Logistic Regression", {}).get("mean", cv_results.get("Ridge", {}).get("mean", 0.0))
+    rf_score = cv_results.get("Random Forest", {}).get("mean", 0.0)
+    xgb_score = cv_results.get("XGBoost", {}).get("mean", 0.0)
+    accuracy = round(float(accuracy_score(y_test, test_preds)) * 100, 2) if is_classification else round(float(best_score * 100), 2)
+    return {
+        "problem_type": problem_type, "best_model": best_name,
+        "accuracy": accuracy, "accuracy_score": accuracy,
+        "auc": round(float(best_score), 4), "auc_score": round(float(best_score), 4),
+        "r2": round(float(best_score), 4) if not is_classification else None,
+        "r2_score": round(float(best_score), 4) if not is_classification else None,
+        "lr_score": round(float(lr_score), 4) if isinstance(lr_score, (int, float)) else 0.0,
+        "rf_score": round(float(rf_score), 4) if isinstance(rf_score, (int, float)) else 0.0,
+        "xgb_score": round(float(xgb_score), 4) if isinstance(xgb_score, (int, float)) else 0.0,
+        "cv_mean": round(float(best_score), 4), "cv_std": cv_results.get(best_name, {}).get("std", 0.0),
+        "train_samples": int(len(X_train)), "test_samples": int(len(X_test)),
+        "n_features": len(X.columns), "feature_importance": importance,
+        "confusion_matrix": cm, "optimal_threshold": threshold,
+        "min_cost": min_cost, "classification_report": report,
+        "features_used": list(X.columns), "classes": classes,
+        "model_path": model_path, "model_card": model_card,
+        "brier_score": brier, "leakage_warnings": leakage_warnings,
+        "schema": schema, "mae": mae, "metric": metric,
+    }

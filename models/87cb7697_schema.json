@@ -1,0 +1,30 @@
+{
+  "columns": {
+    "tenure": {
+      "type": "numeric",
+      "min": 1.0,
+      "max": 29.0,
+      "mean": 15.055555555555555
+    },
+    "MonthlyCharges": {
+      "type": "numeric",
+      "min": 35.02,
+      "max": 77.56,
+      "mean": 56.45444444444445
+    },
+    "Contract": {
+      "type": "categorical",
+      "allowed_categories": [
+        "One year",
+        "Month-to-month"
+      ]
+    }
+  },
+  "numeric_cols": [
+    "tenure",
+    "MonthlyCharges"
+  ],
+  "categorical_cols": [
+    "Contract"
+  ]
+}

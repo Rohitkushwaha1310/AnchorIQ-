@@ -1,0 +1,45 @@
+{
+  "column_names": [
+    "Customer_Name",
+    "Profit",
+    "Discount",
+    "Region"
+  ],
+  "columns": {
+    "Profit": {
+      "type": "float64",
+      "kind": "numeric",
+      "min": 10.0,
+      "max": 134.8
+    },
+    "Discount": {
+      "type": "float64",
+      "kind": "numeric",
+      "min": 0.05,
+      "max": 0.15
+    },
+    "Customer_Name": {
+      "type": "object",
+      "kind": "categorical",
+      "allowed_categories": [
+        "Other"
+      ]
+    },
+    "Region": {
+      "type": "object",
+      "kind": "categorical",
+      "allowed_categories": [
+        "East",
+        "West"
+      ]
+    }
+  },
+  "numeric_cols": [
+    "Profit",
+    "Discount"
+  ],
+  "categorical_cols": [
+    "Customer_Name",
+    "Region"
+  ]
+}
