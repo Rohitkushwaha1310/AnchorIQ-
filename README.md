@@ -15,7 +15,7 @@
   - Benchmarks Logistic Regression / Ridge, Random Forest, and XGBoost with standard scaling.
   - Cross-validation with StratifiedKFold / KFold.
   - Automated threshold cost-tuning for classification ($FN = \$500, FP = \$50$).
-  - Serializes trained pipelines to `models/{session_id}_model.pkl`.
+  - Uploads trained pipelines to authenticated Cloudinary storage; local model files are retained only when cloud storage is unavailable.
 - **AI Executive Insights (`services/insights.py`)**:
   - Generates strategic business analysis using Groq's free LLM tiers (`llama-3.1-8b-instant`, `llama-3.3-70b-versatile`).
   - Seamlessly falls back to a deterministic rule-based business intelligence engine if no API key is provided or offline.
@@ -51,8 +51,10 @@
 └─────────────────────────────────────────────────────────────────┘
               │                           │
               ▼                           ▼
-      [ Static Charts ]           [ Serialized Models ]
-     charts/{session_id}/          models/{session_id}_model.pkl
+        [ Supabase ]                  [ Cloudinary ]
+        Runs, insights, predictions   Charts + private datasets/models/PDFs
+                    │
+                  SQLite/local emergency fallback
 ```
 
 ---
@@ -90,15 +92,27 @@ Copy `.env.example` to `.env`:
 ```bash
 cp .env.example .env
 ```
-Edit `.env` (optional):
+Edit `.env` with your Supabase and Cloudinary credentials:
 ```ini
+# Supabase: Project Settings > Database > Connection string.
+# Use the Session pooler URI for deployed/serverless environments.
+SUPABASE_DB_URL=postgresql://postgres.[project-ref]:[password]@[pooler-host]:6543/postgres?sslmode=require
+
+# Cloudinary: Dashboard > API Environment variable values.
+CLOUDINARY_CLOUD_NAME=your_cloud_name
+CLOUDINARY_API_KEY=your_api_key
+CLOUDINARY_API_SECRET=your_api_secret
+
 # Optional: Free tier Groq API key (https://console.groq.com)
 GROQ_API_KEY=your_key_here
 
 # Maximum upload limit in Megabytes (default: 20)
 MAX_UPLOAD_SIZE_MB=20
 ```
-> **Note**: If `GROQ_API_KEY` is left blank, AnchorIQ will automatically use its internal rule-based business insights engine.
+> **Note**: Keep credentials only in `.env` or your deployment secret manager; never commit them. Supabase PostgreSQL is the primary database. If it is not configured or becomes unavailable, AnchorIQ switches to the emergency SQLite file configured by `ANCHORIQ_EMERGENCY_DB_PATH`; inspect `/health` for the active storage mode. Cloudinary stores charts publicly and datasets, model artifacts, and PDF reports as authenticated raw assets. If Cloudinary upload fails, those artifacts stay local as emergency fallback copies. Set `GROQ_API_KEY` blank to use rule-based insights.
+
+### Supabase schema setup
+Run the SQL in [database/schema.sql](database/schema.sql) in the Supabase SQL Editor before the first deployment. Configure Supabase Row Level Security and network access according to your deployment; the app connects through the PostgreSQL connection string and does not require the Supabase service-role key.
 
 ---
 

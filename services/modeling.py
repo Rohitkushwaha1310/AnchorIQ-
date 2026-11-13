@@ -15,11 +15,13 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.compose import ColumnTransformer
 from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.ensemble import (
+    ExtraTreesClassifier, ExtraTreesRegressor,
     HistGradientBoostingClassifier, HistGradientBoostingRegressor,
     RandomForestClassifier, RandomForestRegressor,
+    VotingClassifier, VotingRegressor,
 )
 from sklearn.impute import SimpleImputer
-from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.linear_model import ElasticNet, Lasso, LogisticRegression, Ridge
 from sklearn.metrics import (
     accuracy_score, average_precision_score, brier_score_loss,
     classification_report, confusion_matrix, mean_absolute_error,
@@ -31,10 +33,15 @@ from sklearn.model_selection import (
 )
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler, label_binarize
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor, export_text
 
 try:
-    from xgboost import XGBClassifier, XGBRegressor
-    HAS_XGB = True
+    import sys
+    if sys.version_info >= (3, 14) and sys.platform == "win32":
+        HAS_XGB = False
+    else:
+        from xgboost import XGBClassifier, XGBRegressor
+        HAS_XGB = True
 except Exception:
     HAS_XGB = False
 
@@ -44,7 +51,30 @@ try:
 except Exception:
     HAS_LGBM = False
 
+try:
+    from catboost import CatBoostClassifier, CatBoostRegressor
+    HAS_CATBOOST = True
+except Exception:
+    HAS_CATBOOST = False
+
 warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
+
+# Configurable model list: disable any model simply by removing or commenting out its line.
+ENABLED_MODELS = [
+    # Fast / Stage 1
+    "Logistic Regression",
+    "Ridge",
+    "ElasticNet",
+    "Lasso",
+    "Decision Tree",
+    # Heavier / Stage 2
+    "Random Forest",
+    "Extra Trees",
+    "HistGradientBoosting",
+    "LightGBM",
+    "XGBoost",
+    "CatBoost",
+]
 
 
 def _build_preprocessor(numeric_cols: list[str], categorical_cols: list[str]) -> ColumnTransformer:
@@ -239,33 +269,126 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
         baseline_estimator = DummyRegressor(strategy="mean")
 
     preprocessor = _build_preprocessor(numeric_cols, categorical_cols)
-    candidates = []
-    if is_classification:
-        candidates = [
-            ("Logistic Regression", LogisticRegression(max_iter=800, class_weight="balanced", random_state=42)),
-            ("HistGradientBoosting", HistGradientBoostingClassifier(max_iter=60, class_weight="balanced", random_state=42)),
-            ("Random Forest", RandomForestClassifier(n_estimators=50, min_samples_leaf=2, class_weight="balanced", n_jobs=1, random_state=42)),
-        ]
-        if HAS_LGBM:
-            candidates.append(("LightGBM", LGBMClassifier(n_estimators=60, class_weight="balanced", verbosity=-1, n_jobs=1, random_state=42)))
-        if HAS_XGB:
-            weight = float((y == 0).sum() / max((y == 1).sum(), 1)) if len(classes) == 2 else 1.0
-            candidates.append(("XGBoost", XGBClassifier(n_estimators=40, max_depth=4, learning_rate=0.08, scale_pos_weight=weight, eval_metric="logloss", verbosity=0, n_jobs=1, random_state=42)))
-        stage1_names = {"Logistic Regression"}
-    else:
-        candidates = [
-            ("Ridge", Ridge()),
-            ("HistGradientBoosting", HistGradientBoostingRegressor(max_iter=60, random_state=42)),
-            ("Random Forest", RandomForestRegressor(n_estimators=50, min_samples_leaf=2, n_jobs=1, random_state=42)),
-        ]
-        if HAS_LGBM:
-            candidates.append(("LightGBM", LGBMRegressor(n_estimators=60, verbosity=-1, n_jobs=1, random_state=42)))
-        if HAS_XGB:
-            candidates.append(("XGBoost", XGBRegressor(n_estimators=40, max_depth=4, learning_rate=0.08, objective="reg:squarederror", verbosity=0, n_jobs=1, random_state=42)))
-        stage1_names = {"Ridge"}
-
     # Stage 1: baseline and inexpensive models; all CV is five-fold when class counts permit.
     cv_results = {}
+    candidates = []
+    notes = []
+
+    if is_classification:
+        if "Logistic Regression" in ENABLED_MODELS:
+            try:
+                candidates.append(("Logistic Regression", LogisticRegression(max_iter=800, class_weight="balanced", random_state=42)))
+            except Exception as exc:
+                cv_results["Logistic Regression"] = {"skipped": f"Init failed: {exc}"}
+        if "Decision Tree" in ENABLED_MODELS:
+            try:
+                candidates.append(("Decision Tree", DecisionTreeClassifier(max_depth=4, class_weight="balanced", random_state=42)))
+            except Exception as exc:
+                cv_results["Decision Tree"] = {"skipped": f"Init failed: {exc}"}
+        if "HistGradientBoosting" in ENABLED_MODELS:
+            try:
+                candidates.append(("HistGradientBoosting", HistGradientBoostingClassifier(max_iter=60, class_weight="balanced", random_state=42)))
+            except Exception as exc:
+                cv_results["HistGradientBoosting"] = {"skipped": f"Init failed: {exc}"}
+        if "Random Forest" in ENABLED_MODELS:
+            try:
+                candidates.append(("Random Forest", RandomForestClassifier(n_estimators=50, min_samples_leaf=2, class_weight="balanced", n_jobs=1, random_state=42)))
+            except Exception as exc:
+                cv_results["Random Forest"] = {"skipped": f"Init failed: {exc}"}
+        if "Extra Trees" in ENABLED_MODELS:
+            try:
+                candidates.append(("Extra Trees", ExtraTreesClassifier(n_estimators=50, min_samples_leaf=2, class_weight="balanced", n_jobs=1, random_state=42)))
+            except Exception as exc:
+                cv_results["Extra Trees"] = {"skipped": f"Init failed: {exc}"}
+        if "LightGBM" in ENABLED_MODELS and HAS_LGBM:
+            try:
+                candidates.append(("LightGBM", LGBMClassifier(n_estimators=60, class_weight="balanced", verbosity=-1, n_jobs=1, random_state=42)))
+            except Exception as exc:
+                cv_results["LightGBM"] = {"skipped": f"Init failed: {exc}"}
+        if "XGBoost" in ENABLED_MODELS and HAS_XGB:
+            try:
+                weight = float((y == 0).sum() / max((y == 1).sum(), 1)) if len(classes) == 2 else 1.0
+                candidates.append(("XGBoost", XGBClassifier(n_estimators=40, max_depth=4, learning_rate=0.08, scale_pos_weight=weight, eval_metric="logloss", verbosity=0, n_jobs=1, random_state=42)))
+            except Exception as exc:
+                cv_results["XGBoost"] = {"skipped": f"Init failed: {exc}"}
+        if "CatBoost" in ENABLED_MODELS:
+            if not HAS_CATBOOST:
+                warnings.warn("CatBoost is enabled in ENABLED_MODELS but is not installed or failed to import; skipping CatBoost.", UserWarning)
+                notes.append("CatBoost is not installed or failed to import; skipping CatBoost.")
+                cv_results["CatBoost"] = {"skipped": "CatBoost not installed or failed to import"}
+            else:
+                try:
+                    try:
+                        cb_clf = CatBoostClassifier(iterations=60, verbose=0, random_state=42, auto_class_weights="Balanced", thread_count=1)
+                    except Exception:
+                        cb_clf = CatBoostClassifier(iterations=60, verbose=0, random_state=42, thread_count=1)
+                    candidates.append(("CatBoost", cb_clf))
+                except Exception as exc:
+                    warnings.warn(f"Failed to initialize CatBoost ({exc}); skipping.", UserWarning)
+                    notes.append(f"Failed to initialize CatBoost ({exc}); skipping.")
+                    cv_results["CatBoost"] = {"skipped": f"Init failed: {exc}"}
+        stage1_names = {"Logistic Regression", "Decision Tree"}
+    else:
+        if "Ridge" in ENABLED_MODELS:
+            try:
+                candidates.append(("Ridge", Ridge()))
+            except Exception as exc:
+                cv_results["Ridge"] = {"skipped": f"Init failed: {exc}"}
+        if "ElasticNet" in ENABLED_MODELS:
+            try:
+                candidates.append(("ElasticNet", ElasticNet(random_state=42)))
+            except Exception as exc:
+                cv_results["ElasticNet"] = {"skipped": f"Init failed: {exc}"}
+        if "Lasso" in ENABLED_MODELS:
+            try:
+                candidates.append(("Lasso", Lasso(random_state=42)))
+            except Exception as exc:
+                cv_results["Lasso"] = {"skipped": f"Init failed: {exc}"}
+        if "Decision Tree" in ENABLED_MODELS:
+            try:
+                candidates.append(("Decision Tree", DecisionTreeRegressor(max_depth=4, random_state=42)))
+            except Exception as exc:
+                cv_results["Decision Tree"] = {"skipped": f"Init failed: {exc}"}
+        if "HistGradientBoosting" in ENABLED_MODELS:
+            try:
+                candidates.append(("HistGradientBoosting", HistGradientBoostingRegressor(max_iter=60, random_state=42)))
+            except Exception as exc:
+                cv_results["HistGradientBoosting"] = {"skipped": f"Init failed: {exc}"}
+        if "Random Forest" in ENABLED_MODELS:
+            try:
+                candidates.append(("Random Forest", RandomForestRegressor(n_estimators=50, min_samples_leaf=2, n_jobs=1, random_state=42)))
+            except Exception as exc:
+                cv_results["Random Forest"] = {"skipped": f"Init failed: {exc}"}
+        if "Extra Trees" in ENABLED_MODELS:
+            try:
+                candidates.append(("Extra Trees", ExtraTreesRegressor(n_estimators=50, min_samples_leaf=2, n_jobs=1, random_state=42)))
+            except Exception as exc:
+                cv_results["Extra Trees"] = {"skipped": f"Init failed: {exc}"}
+        if "LightGBM" in ENABLED_MODELS and HAS_LGBM:
+            try:
+                candidates.append(("LightGBM", LGBMRegressor(n_estimators=60, verbosity=-1, n_jobs=1, random_state=42)))
+            except Exception as exc:
+                cv_results["LightGBM"] = {"skipped": f"Init failed: {exc}"}
+        if "XGBoost" in ENABLED_MODELS and HAS_XGB:
+            try:
+                candidates.append(("XGBoost", XGBRegressor(n_estimators=40, max_depth=4, learning_rate=0.08, objective="reg:squarederror", verbosity=0, n_jobs=1, random_state=42)))
+            except Exception as exc:
+                cv_results["XGBoost"] = {"skipped": f"Init failed: {exc}"}
+        if "CatBoost" in ENABLED_MODELS:
+            if not HAS_CATBOOST:
+                warnings.warn("CatBoost is enabled in ENABLED_MODELS but is not installed or failed to import; skipping CatBoost.", UserWarning)
+                notes.append("CatBoost is not installed or failed to import; skipping CatBoost.")
+                cv_results["CatBoost"] = {"skipped": "CatBoost not installed or failed to import"}
+            else:
+                try:
+                    cb_reg = CatBoostRegressor(iterations=60, verbose=0, random_state=42, thread_count=1)
+                    candidates.append(("CatBoost", cb_reg))
+                except Exception as exc:
+                    warnings.warn(f"Failed to initialize CatBoost ({exc}); skipping.", UserWarning)
+                    notes.append(f"Failed to initialize CatBoost ({exc}); skipping.")
+                    cv_results["CatBoost"] = {"skipped": f"Init failed: {exc}"}
+        stage1_names = {"Ridge", "ElasticNet", "Lasso", "Decision Tree"}
+
     baseline_pipe = Pipeline([("preprocessor", clone(preprocessor)), ("model", baseline_estimator)])
     baseline_scores, baseline_error = _safe_score(baseline_pipe, X_search, y_search, cv, scoring)
     baseline_mean = float(np.mean(baseline_scores)) if baseline_scores else (0.5 if is_classification and metric == "ROC-AUC" else (minority if is_classification else 0.0))
@@ -275,7 +398,6 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
 
     fitted_candidates = {}
     best_name, best_pipe, best_score = None, None, -float("inf")
-    notes = []
 
     def remaining():
         return budget - (time.monotonic() - started)
@@ -319,6 +441,74 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
     if not np.isfinite(best_score):
         best_score = baseline_mean
         best_name, best_pipe = "Baseline", baseline_pipe
+
+    # Top-3 Ensemble (Soft-voting for classification, averaging for regression)
+    ensemble_kept = False
+    ensemble_details = "Ensemble not evaluated."
+    valid_singles = [
+        (n, m, p) for n, (p, m) in fitted_candidates.items()
+        if n != "Baseline" and np.isfinite(m)
+    ]
+    valid_singles.sort(key=lambda item: item[1], reverse=True)
+
+    if len(valid_singles) >= 3 and remaining() > max(3.0, budget * 0.05):
+        top_3 = valid_singles[:3]
+        top_3_names = [item[0] for item in top_3]
+        try:
+            member_estimators = [(n, clone(p.named_steps["model"])) for n, _, p in top_3]
+            if is_classification:
+                ensemble_model = VotingClassifier(estimators=member_estimators, voting="soft")
+            else:
+                ensemble_model = VotingRegressor(estimators=member_estimators)
+
+            ensemble_pipe = Pipeline([
+                ("preprocessor", clone(preprocessor)),
+                ("model", ensemble_model)
+            ])
+
+            ens_scores, ens_error = _safe_score(ensemble_pipe, X_search, y_search, cv, scoring)
+            if ens_error:
+                cv_results["Ensemble"] = {"error": ens_error}
+                ensemble_details = f"Ensemble evaluation failed: {ens_error}"
+                notes.append(ensemble_details)
+            elif ens_scores:
+                ens_mean = float(np.mean(ens_scores))
+                ens_std = float(np.std(ens_scores))
+                cv_results["Ensemble"] = {
+                    "mean": round(ens_mean, 4),
+                    "std": round(ens_std, 4)
+                }
+
+                best_single_name = valid_singles[0][0]
+                best_single_score = valid_singles[0][1]
+
+                if ens_mean > best_single_score:
+                    best_name = "Ensemble"
+                    best_pipe = ensemble_pipe
+                    best_score = ens_mean
+                    ensemble_kept = True
+                    ensemble_details = (
+                        f"{'Soft-voting' if is_classification else 'Averaging'} ensemble of top 3 models "
+                        f"({', '.join(top_3_names)}) kept: cross-validation {metric} ({ens_mean:.4f}) "
+                        f"beat the best single model ({best_single_name}: {best_single_score:.4f})."
+                    )
+                else:
+                    ensemble_kept = False
+                    ensemble_details = (
+                        f"Ensemble of top 3 models ({', '.join(top_3_names)}) evaluated "
+                        f"(CV {metric}: {ens_mean:.4f}) but not kept: "
+                        f"did not beat best single model ({best_single_name}: {best_single_score:.4f})."
+                    )
+                notes.append(ensemble_details)
+        except Exception as exc:
+            cv_results["Ensemble"] = {"error": str(exc)}
+            ensemble_details = f"Ensemble creation/evaluation encountered error: {exc}"
+            notes.append(ensemble_details)
+    elif len(valid_singles) < 3:
+        ensemble_details = f"Ensemble omitted: fewer than 3 single models were successfully evaluated ({len(valid_singles)})."
+    else:
+        cv_results["Ensemble"] = {"skipped": "time budget reserve reached"}
+        ensemble_details = "Ensemble omitted: insufficient time remaining in budget."
 
     # Fit the chosen complete pipeline on all available data, then calibrate if time allows.
     brier = None
@@ -401,8 +591,32 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
     )
     if best_name == "Baseline" or margin < 0:
         verdict = "weak: barely beats baseline"
-    why_won = (f"Highest cross-validated {metric} ({best_score:.4f}); improvement over baseline is {margin:+.4f}."
-               if best_name != "Baseline" else "No non-baseline candidate produced a better valid cross-validation score.")
+
+    if best_name == "Ensemble":
+        why_won = (
+            f"{'Soft-voting' if is_classification else 'Averaging'} ensemble of top 3 models "
+            f"({', '.join(top_3_names)}) achieved highest cross-validated {metric} ({best_score:.4f}); "
+            f"improvement over baseline is {margin:+.4f}."
+        )
+    else:
+        why_won = (f"Highest cross-validated {metric} ({best_score:.4f}); improvement over baseline is {margin:+.4f}."
+                   if best_name != "Baseline" else "No non-baseline candidate produced a better valid cross-validation score.")
+
+    # Shallow Decision Tree rules limited to 15 lines
+    decision_rules = None
+    if "Decision Tree" in fitted_candidates:
+        try:
+            dt_pipe_proto, _ = fitted_candidates["Decision Tree"]
+            dt_pipe_fit = clone(dt_pipe_proto)
+            dt_pipe_fit.fit(X, y)
+            prep_step = dt_pipe_fit.named_steps["preprocessor"]
+            feature_names = [f.split("__", 1)[-1] for f in prep_step.get_feature_names_out()]
+            dt_model_step = dt_pipe_fit.named_steps["model"]
+            raw_rules = export_text(dt_model_step, feature_names=list(feature_names), max_depth=4)
+            rule_lines = [line for line in raw_rules.splitlines() if line.strip()]
+            decision_rules = "\n".join(rule_lines[:15])
+        except Exception as exc:
+            decision_rules = f"Could not export decision rules: {exc}"
 
     importance = {}
     try:
@@ -414,6 +628,20 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
             if values is None and hasattr(model, "coef_"):
                 coef = np.asarray(model.coef_)
                 values = np.abs(coef[0] if coef.ndim > 1 else coef)
+            if values is None and hasattr(model, "estimators_"):
+                member_importances = []
+                for est in model.estimators_:
+                    sub_vals = getattr(est, "feature_importances_", None)
+                    if sub_vals is None and hasattr(est, "coef_"):
+                        c = np.asarray(est.coef_)
+                        sub_vals = np.abs(c[0] if c.ndim > 1 else c)
+                    if sub_vals is not None and len(sub_vals) == len(names):
+                        s = float(np.sum(sub_vals))
+                        if s > 0:
+                            sub_vals = np.asarray(sub_vals, dtype=float) / s
+                        member_importances.append(sub_vals)
+                if member_importances:
+                    values = np.mean(member_importances, axis=0)
             if values is not None:
                 importance = {k: round(float(v), 4) for k, v in sorted(zip(names, values), key=lambda x: x[1], reverse=True)[:10]}
     except Exception:
@@ -428,6 +656,9 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
         "baseline_score": round(baseline_mean, 4), "metric": metric,
         "metric_reason": metric_reason, "winner": best_name,
         "winning_score": round(float(best_score), 4), "why_it_won": why_won,
+        "decision_rules": decision_rules,
+        "ensemble_kept": ensemble_kept,
+        "ensemble_details": ensemble_details,
         "brier_score": brier, "mae": mae,
         "time_used_seconds": round(time.monotonic() - started, 2),
         "time_budget_seconds": budget, "subsampled": subsampled,
@@ -452,6 +683,10 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
     lr_score = cv_results.get("Logistic Regression", {}).get("mean", cv_results.get("Ridge", {}).get("mean", 0.0))
     rf_score = cv_results.get("Random Forest", {}).get("mean", 0.0)
     xgb_score = cv_results.get("XGBoost", {}).get("mean", 0.0)
+    dt_score = cv_results.get("Decision Tree", {}).get("mean", 0.0)
+    et_score = cv_results.get("Extra Trees", {}).get("mean", 0.0)
+    cb_score = cv_results.get("CatBoost", {}).get("mean", 0.0)
+    ens_score = cv_results.get("Ensemble", {}).get("mean", 0.0)
     accuracy = round(float(accuracy_score(y_test, test_preds)) * 100, 2) if is_classification else round(float(best_score * 100), 2)
     return {
         "problem_type": problem_type, "best_model": best_name,
@@ -462,6 +697,12 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
         "lr_score": round(float(lr_score), 4) if isinstance(lr_score, (int, float)) else 0.0,
         "rf_score": round(float(rf_score), 4) if isinstance(rf_score, (int, float)) else 0.0,
         "xgb_score": round(float(xgb_score), 4) if isinstance(xgb_score, (int, float)) else 0.0,
+        "dt_score": round(float(dt_score), 4) if isinstance(dt_score, (int, float)) else 0.0,
+        "et_score": round(float(et_score), 4) if isinstance(et_score, (int, float)) else 0.0,
+        "cb_score": round(float(cb_score), 4) if isinstance(cb_score, (int, float)) else 0.0,
+        "ensemble_score": round(float(ens_score), 4) if isinstance(ens_score, (int, float)) else 0.0,
+        "decision_rules": decision_rules,
+        "ensemble_kept": ensemble_kept,
         "cv_mean": round(float(best_score), 4), "cv_std": cv_results.get(best_name, {}).get("std", 0.0),
         "train_samples": int(len(X_train)), "test_samples": int(len(X_test)),
         "n_features": len(X.columns), "feature_importance": importance,

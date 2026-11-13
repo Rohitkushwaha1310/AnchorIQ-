@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import io
 from typing import Any, Dict, List, Optional
 import joblib
 import numpy as np
@@ -86,13 +87,28 @@ def load_model_bundle(session_or_run_id: Any, models_dir: str = "models") -> Dic
     return saved
 
 
-def predict_single(session_id: Any, input_data: Dict[str, Any], models_dir: str = "models") -> Dict[str, Any]:
+def load_model_bundle_from_bytes(model_bytes: bytes) -> Dict[str, Any]:
+    """Load a serialized model directly from remote storage without persisting it locally."""
+    if not model_bytes:
+        raise FileNotFoundError("The remote model artifact is empty.")
+    saved = joblib.load(io.BytesIO(model_bytes))
+    if not isinstance(saved, dict):
+        saved = {"pipeline": saved, "features": [], "problem_type": "classification"}
+    return saved
+
+
+def predict_single(
+    session_id: Any,
+    input_data: Dict[str, Any],
+    models_dir: str = "models",
+    bundle: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
     Run prediction on a single manual input row.
     Validates against the model's schema, evaluates pipeline, computes calibrated
     probability, classifies risk level using named constants, and computes reasons.
     """
-    bundle = load_model_bundle(session_id, models_dir=models_dir)
+    bundle = bundle or load_model_bundle(session_id, models_dir=models_dir)
     pipeline = bundle.get("pipeline")
     features = bundle.get("features", [])
     target = bundle.get("target", "Target")

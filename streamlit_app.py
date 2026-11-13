@@ -614,15 +614,19 @@ if "result" in st.session_state:
     # ── KPI Tiles Grid ────────────────────────────────────────────────────────
     is_reg = ml.get("problem_type") == "regression"
     if is_reg:
-        kpi_score_val = f"{ml.get('r2_score', '—')}"
+        score_num = ml.get("r2_score") if ml.get("r2_score") is not None else ml.get("r2")
+        kpi_score_val = f"{score_num:.4f}" if isinstance(score_num, (int, float)) else str(score_num or "—")
         kpi_score_lbl = "R² Champion Score"
-        kpi_sec_val   = f"{ml.get('rmse', '—')}"
-        kpi_sec_lbl   = "RMSE Error"
+        mae_num = ml.get("mae") if ml.get("mae") is not None else ml.get("rmse")
+        kpi_sec_val   = f"{mae_num:.4f}" if isinstance(mae_num, (int, float)) else str(mae_num or "—")
+        kpi_sec_lbl   = "MAE Error"
     else:
-        kpi_score_val = f"{ml.get('auc', '—')}"
+        auc_num = ml.get("auc") if ml.get("auc") is not None else ml.get("auc_score")
+        kpi_score_val = f"{auc_num:.4f}" if isinstance(auc_num, (int, float)) else str(auc_num or "—")
         kpi_score_lbl = "AUC-ROC Score"
-        kpi_sec_val   = f"{ml.get('accuracy', '—')}%"
-        kpi_sec_lbl   = "Accuracy"
+        acc_num = ml.get("accuracy") if ml.get("accuracy") is not None else ml.get("accuracy_score")
+        kpi_sec_val   = f"{acc_num}%" if acc_num is not None else "—"
+        kpi_sec_lbl   = "Holdout Accuracy"
 
     st.markdown(f"""
     <div class="kpi-grid">
@@ -706,11 +710,14 @@ if "result" in st.session_state:
             m_col1, m_col2, m_col3, m_col4 = st.columns(4)
             m_col1.metric("🏆 Champion Model", ml.get("best_model", "—"))
             if is_reg:
-                m_col2.metric("📈 R² Fit Score", ml.get("r2_score", "—"))
-                m_col3.metric("📉 RMSE Error", ml.get("rmse", "—"))
+                r2_val = ml.get("r2_score") if ml.get("r2_score") is not None else ml.get("r2", "—")
+                m_col2.metric("📈 R² Fit Score", f"{r2_val:.4f}" if isinstance(r2_val, (int, float)) else str(r2_val))
+                mae_val = ml.get("mae") if ml.get("mae") is not None else ml.get("rmse", "—")
+                m_col3.metric("📉 MAE Error", f"{mae_val:.4f}" if isinstance(mae_val, (int, float)) else str(mae_val))
                 m_col4.metric("🔄 5-Fold CV R²", f"{ml.get('cv_mean','—')} ± {ml.get('cv_std','0')}")
             else:
-                m_col2.metric("📈 AUC-ROC", ml.get("auc", "—"))
+                auc_val = ml.get("auc") if ml.get("auc") is not None else ml.get("auc_score", "—")
+                m_col2.metric("📈 AUC-ROC", f"{auc_val:.4f}" if isinstance(auc_val, (int, float)) else str(auc_val))
                 m_col3.metric("🎯 Accuracy", f"{ml.get('accuracy', '—')}%")
                 m_col4.metric("🔄 5-Fold CV Score", f"{ml.get('cv_mean','—')} ± {ml.get('cv_std','0')}")
 
@@ -720,29 +727,69 @@ if "result" in st.session_state:
 
             with col_cmp:
                 st.markdown("#### 🏆 Model Tournament Benchmark")
-                if is_reg:
-                    cmp_data = [
-                        {"Model": "Ridge Regression",  "Score": ml.get("lr_r2", "—"), "Winner": "🏆" if ml.get("best_model") == "Ridge Regression" else ""},
-                        {"Model": "Random Forest",     "Score": ml.get("rf_r2", "—"), "Winner": "🏆" if ml.get("best_model") == "Random Forest" else ""},
-                        {"Model": "XGBoost Regressor", "Score": ml.get("xgb_r2", "—"),"Winner": "🏆" if ml.get("best_model") == "XGBoost Regressor" else ""},
-                    ]
+                best_model_name = ml.get("best_model", "")
+                metric_name = ml.get("metric", "AUC-ROC" if not is_reg else "R²")
+                card_scores = ml.get("model_card", {}).get("cv_scores", {})
+
+                if card_scores:
+                    cmp_rows = []
+                    for model_name, score_info in card_scores.items():
+                        if isinstance(score_info, dict):
+                            if "mean" in score_info:
+                                mean_val = score_info["mean"]
+                                std_val = score_info.get("std", 0.0)
+                                score_str = f"{mean_val:.4f} ± {std_val:.4f}"
+                            elif "skipped" in score_info:
+                                score_str = f"Skipped: {score_info['skipped']}"
+                            elif "error" in score_info:
+                                score_str = f"Error: {score_info['error']}"
+                            else:
+                                score_str = "—"
+                        else:
+                            score_str = str(score_info)
+
+                        is_winner = (model_name == best_model_name)
+                        cmp_rows.append({
+                            "Model": model_name,
+                            f"CV Score ({metric_name})": score_str,
+                            "Status": "🏆 Champion" if is_winner else ""
+                        })
+                    safe_dataframe(pd.DataFrame(cmp_rows), use_container_width=True, hide_index=True)
                 else:
+                    # Fallback to direct keys
                     cmp_data = [
-                        {"Model": "Logistic Regression", "Score (AUC)": ml.get("lr_auc", "—"), "Winner": "🏆" if ml.get("best_model") == "Logistic Regression" else ""},
-                        {"Model": "Random Forest",       "Score (AUC)": ml.get("rf_auc", "—"), "Winner": "🏆" if ml.get("best_model") == "Random Forest" else ""},
-                        {"Model": "XGBoost Classifier",  "Score (AUC)": ml.get("xgb_auc", "—"),"Winner": "🏆" if ml.get("best_model") == "XGBoost" else ""},
+                        {"Model": "Logistic Regression" if not is_reg else "Ridge", "Score": ml.get("lr_score", "—"), "Status": "🏆 Champion" if best_model_name in ["Logistic Regression", "Ridge"] else ""},
+                        {"Model": "Decision Tree", "Score": ml.get("dt_score", "—"), "Status": "🏆 Champion" if best_model_name == "Decision Tree" else ""},
+                        {"Model": "Random Forest", "Score": ml.get("rf_score", "—"), "Status": "🏆 Champion" if best_model_name == "Random Forest" else ""},
+                        {"Model": "Extra Trees", "Score": ml.get("et_score", "—"), "Status": "🏆 Champion" if best_model_name == "Extra Trees" else ""},
+                        {"Model": "XGBoost", "Score": ml.get("xgb_score", "—"), "Status": "🏆 Champion" if best_model_name == "XGBoost" else ""},
+                        {"Model": "Ensemble", "Score": ml.get("ensemble_score", "—"), "Status": "🏆 Champion" if best_model_name == "Ensemble" else ""},
                     ]
-                safe_dataframe(pd.DataFrame(cmp_data), use_container_width=True, hide_index=True)
+                    safe_dataframe(pd.DataFrame(cmp_data), use_container_width=True, hide_index=True)
 
             with col_details:
                 st.markdown("#### 📋 Architecture Details")
                 st.markdown(f"""
+                - **Champion Model:** `{best_model_name}`
                 - **Training Instances:** `{ml.get('train_samples', 0):,}`
                 - **Evaluation Holdout:** `{ml.get('test_samples', 0):,}`
                 - **Active Engineered Features:** `{ml.get('n_features', 0)}`
                 - **CV Stability (Std Dev):** `{ml.get('cv_std', '0')}`
-                - **Formulation:** `{ml.get('problem_type', 'N/A').title()}`
+                - **Problem Formulation:** `{ml.get('problem_type', 'N/A').title()}`
+                - **Reliability Verdict:** `{str(ml.get('model_card', {}).get('reliability_verdict', 'N/A')).title()}`
                 """)
+                why_won = ml.get("model_card", {}).get("why_it_won")
+                if why_won:
+                    st.info(f"**Selection Rationale:** {why_won}")
+                ens_details = ml.get("model_card", {}).get("ensemble_details")
+                if ens_details:
+                    st.caption(f"**Ensemble Audit:** {ens_details}")
+
+            # Shallow Decision Tree rules
+            rules = ml.get("decision_rules") or ml.get("model_card", {}).get("decision_rules")
+            if rules:
+                with st.expander("🌲 Shallow Decision Tree Rules (Explainability)", expanded=False):
+                    st.code(rules, language="text")
 
             # Feature Importance
             fi = ml.get("feature_importance", {})

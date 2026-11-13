@@ -5,14 +5,14 @@ import uuid
 import re
 import io
 import json
-import base64
+import tempfile
 import pandas as pd
 from typing import Optional, Dict, Any, List
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Request
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
@@ -29,11 +29,12 @@ from services.predictor import (
     predict_single,
     validate_input_against_schema,
     load_model_bundle,
+    load_model_bundle_from_bytes,
     RISK_LOW_THRESHOLD,
     RISK_HIGH_THRESHOLD,
 )
 from services.explanations import explain_winning_model
-from services.cloudinary import upload_chart_png
+from services.cloudinary import download_private_file, upload_chart_png, upload_private_file
 from database.db import (
     initialize_database,
     save_run_record,
@@ -42,6 +43,7 @@ from database.db import (
     delete_run_record,
     build_fact_card,
     save_prediction_record,
+    get_database_status,
 )
 from services.agent import ask_business_question
 
@@ -162,16 +164,30 @@ def _build_model_card(df: pd.DataFrame, model_path: Optional[str] = None, detail
     else:
         schema = {str(col): str(dtype) for col, dtype in df.dtypes.items()}
     model_card = {"schema": schema}
-    if model_path and os.path.exists(model_path):
-        with open(model_path, "rb") as fh:
-            model_card["model_file_b64"] = base64.b64encode(fh.read()).decode("utf-8")
-            model_card["saved_path"] = model_path
     return model_card
+
+
+def _load_saved_bundle(run: dict, identifier: str):
+    """Prefer the authenticated Cloudinary artifact; use a local copy only as emergency fallback."""
+    model_asset = (run.get("model_card") or {}).get("model_asset")
+    if model_asset and model_asset.get("public_id"):
+        try:
+            artifact = download_private_file(
+                model_asset["public_id"], model_asset.get("format") or "pkl"
+            )
+            return load_model_bundle_from_bytes(artifact)
+        except Exception as exc:
+            print(f"[WARN] Remote model unavailable; trying emergency local copy ({type(exc).__name__}).")
+    return load_model_bundle(identifier, models_dir="models")
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "2.0"}
+    storage = get_database_status()
+    from services.cloudinary import cloudinary_configured
+
+    storage["cloudinary_configured"] = cloudinary_configured()
+    return {"status": "healthy", "version": "2.0", "storage": storage}
 
 
 @app.post("/analyze")
@@ -300,7 +316,7 @@ async def analyze(
                 "title": title,
                 "cloudinary_url": secure_url,
                 "cloudinary_public_id": public_id,
-                "fact_card": _build_fact_card(title, cleaned_df, target=detected_target, local_path=chart_path),
+                "fact_card": _build_fact_card(title, cleaned_df, target=detected_target),
             })
 
         if shap_card:
@@ -325,16 +341,34 @@ async def analyze(
                 "fact_card": top_card,
             })
 
-        model_path = os.path.join("models", f"{session_id}.pkl")
-        if os.path.exists("models/model.pkl"):
-            import shutil
-            shutil.copy2("models/model.pkl", model_path)
-
-        model_card = _build_model_card(
-            cleaned_df,
-            model_path if os.path.exists(model_path) else None,
-            detailed_schema=model_results.get("schema")
+        model_path = os.path.join("models", f"{session_id}_model.pkl")
+        model_asset = (
+            upload_private_file(model_path, session_id, f"model_{session_id}.pkl")
+            if os.path.exists(model_path)
+            else {"uploaded": False}
         )
+
+        dataset_asset = {"uploaded": False}
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as dataset_file:
+            temporary_dataset_path = dataset_file.name
+        try:
+            cleaned_df.to_csv(temporary_dataset_path, index=False)
+            dataset_asset = upload_private_file(
+                temporary_dataset_path, session_id, f"dataset_{session_id}.csv"
+            )
+        finally:
+            if os.path.exists(temporary_dataset_path):
+                os.remove(temporary_dataset_path)
+
+        model_card = _build_model_card(cleaned_df, detailed_schema=model_results.get("schema"))
+        model_card["session_id"] = session_id
+        if model_asset.get("uploaded"):
+            model_card["model_asset"] = model_asset
+        if dataset_asset.get("uploaded"):
+            model_card["dataset_asset"] = dataset_asset
+        else:
+            model_card["dataset_local_path"] = os.path.join("uploads", f"{session_id}.csv")
+            cleaned_df.to_csv(model_card["dataset_local_path"], index=False)
         model_card["dataset_summary"] = {
             "rows": int(inspection.get("rows", len(cleaned_df))),
             "target": detected_target or "not stored",
@@ -351,19 +385,28 @@ async def analyze(
             chat_messages=[{"role": "assistant", "content": insights}],
         )
 
-        # Persist run-specific artifacts
+        # Keep local artifact copies only when Cloudinary is unavailable (emergency mode).
         import shutil
         src_model = os.path.join("models", f"{session_id}_model.pkl")
         dst_model = os.path.join("models", f"{run_id}_model.pkl")
-        if os.path.exists(src_model):
+        if os.path.exists(src_model) and not model_asset.get("uploaded"):
             shutil.copy2(src_model, dst_model)
         src_schema = os.path.join("models", f"{session_id}_schema.json")
         dst_schema = os.path.join("models", f"{run_id}_schema.json")
-        if os.path.exists(src_schema):
+        if os.path.exists(src_schema) and not model_asset.get("uploaded"):
             shutil.copy2(src_schema, dst_schema)
 
-        # Save dataset for A/B testing
-        cleaned_df.to_csv(os.path.join("uploads", f"{run_id}.csv"), index=False)
+        if model_asset.get("uploaded"):
+            for artifact_path in (src_model, src_schema):
+                if os.path.exists(artifact_path):
+                    os.remove(artifact_path)
+
+        if chart_records and all(
+            record.get("cloudinary_public_id")
+            for record in chart_records
+            if record.get("cloudinary_url")
+        ):
+            shutil.rmtree(charts_dir, ignore_errors=True)
 
         resp_payload = {
             "session_id": session_id,
@@ -372,8 +415,8 @@ async def analyze(
             "analysis_type": analysis_type,
             "inspection": inspection,
             "cleaning": cleaning_report,
-            "chart_paths": chart_paths,
-            "chart_urls": [chart.get("cloudinary_url") for chart in chart_records],
+            "chart_paths": [chart.get("cloudinary_url") for chart in chart_records if chart.get("cloudinary_url")],
+            "chart_urls": [chart.get("cloudinary_url") for chart in chart_records if chart.get("cloudinary_url")],
             "model_results": model_results,
             "insights": insights,
             "status": "Analysis completed successfully!",
@@ -400,6 +443,31 @@ def get_run_detail(run_id: int):
     if not run:
         raise HTTPException(status_code=404, detail="Run not found.")
     return run
+
+
+@app.get("/runs/{run_id}/report")
+def download_saved_report(run_id: int):
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    model_card = run.get("model_card") or {}
+    report_asset = model_card.get("report_asset") or {}
+    if report_asset.get("public_id"):
+        try:
+            report_bytes = download_private_file(
+                report_asset["public_id"], report_asset.get("format") or "pdf"
+            )
+            return Response(
+                content=report_bytes,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f'attachment; filename="AnchorIQ_Report_{run_id}.pdf"'},
+            )
+        except Exception:
+            pass
+    local_path = model_card.get("report_local_path")
+    if local_path and os.path.exists(local_path):
+        return FileResponse(local_path, media_type="application/pdf", filename=f"AnchorIQ_Report_{run_id}.pdf")
+    raise HTTPException(status_code=404, detail="No stored report is available for this run.")
 
 
 @app.post("/chat/{run_id}")
@@ -456,6 +524,7 @@ def predict_with_schema(run_id: str, payload: Dict[str, Any]):
 
     # Fetch schema for validation
     schema = None
+    run_record = None
     schema_path = os.path.join("models", f"{run_id}_schema.json")
     if os.path.exists(schema_path):
         try:
@@ -467,10 +536,15 @@ def predict_with_schema(run_id: str, payload: Dict[str, Any]):
     if not schema:
         try:
             run_int = int(run_id)
-            run = get_run(run_int)
-            if run and run.get("model_card"):
-                schema = run["model_card"].get("schema")
+            run_record = get_run(run_int)
+            if run_record and run_record.get("model_card"):
+                schema = run_record["model_card"].get("schema")
         except Exception:
+            pass
+    elif run_record is None:
+        try:
+            run_record = get_run(int(run_id))
+        except (TypeError, ValueError):
             pass
 
     if not schema:
@@ -487,10 +561,16 @@ def predict_with_schema(run_id: str, payload: Dict[str, Any]):
             raise HTTPException(status_code=400, detail=str(ve))
 
     try:
+        remote_bundle = (
+            _load_saved_bundle(run_record, run_id)
+            if run_record and (run_record.get("model_card") or {}).get("model_asset")
+            else None
+        )
         result = predict_single(
             session_id=run_id,
             input_data=inputs,
-            models_dir="models"
+            models_dir="models",
+            bundle=remote_bundle,
         )
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
@@ -513,10 +593,23 @@ def predict_with_schema(run_id: str, payload: Dict[str, Any]):
 @app.post("/predict")
 async def predict(payload: PredictRequest):
     try:
+        run_record = next(
+            (
+                item for item in get_runs()
+                if (item.get("model_card") or {}).get("session_id") == payload.session_id
+            ),
+            None,
+        )
+        remote_bundle = (
+            _load_saved_bundle(run_record, payload.session_id)
+            if run_record and (run_record.get("model_card") or {}).get("model_asset")
+            else None
+        )
         result = predict_single(
             session_id=payload.session_id,
             input_data=payload.input_data,
-            models_dir="models"
+            models_dir="models",
+            bundle=remote_bundle,
         )
         return result
     except FileNotFoundError as fe:
@@ -550,14 +643,29 @@ def ab_test(payload: ABTestPayload):
             df = pd.DataFrame(payload.dataset)
     elif payload.run_id is not None:
         req_run_id = str(payload.run_id)
+        run_record = None
+        try:
+            run_record = get_run(int(req_run_id))
+        except (TypeError, ValueError):
+            pass
+        dataset_asset = (run_record or {}).get("model_card", {}).get("dataset_asset") or {}
+        if dataset_asset.get("public_id"):
+            try:
+                dataset_bytes = download_private_file(
+                    dataset_asset["public_id"], dataset_asset.get("format") or "csv"
+                )
+                df = pd.read_csv(io.BytesIO(dataset_bytes))
+            except Exception:
+                df = None
         candidates = [
             os.path.join("uploads", f"{req_run_id}.csv"),
+            (run_record or {}).get("model_card", {}).get("dataset_local_path", ""),
             os.path.join("reports", f"{req_run_id}_enriched.csv"),
         ]
-        path = next((p for p in candidates if os.path.exists(p)), None)
-        if path:
+        path = next((p for p in candidates if p and os.path.exists(p)), None)
+        if df is None and path:
             df = pd.read_csv(path)
-        else:
+        if df is None:
             raise HTTPException(status_code=404, detail=f"No dataset found for run '{req_run_id}'.")
 
     if df is None:
@@ -645,10 +753,53 @@ async def generate_report(
         if not os.path.exists(pdf_path):
             raise HTTPException(status_code=500, detail="PDF generation failed to output file.")
 
-        return FileResponse(
-            pdf_path,
+        report_asset = upload_private_file(
+            pdf_path, session_id, f"report_{session_id}.pdf"
+        )
+        report_chart_records = []
+        for index, chart_path in enumerate(chart_paths):
+            chart_title = os.path.basename(chart_path)
+            uploaded = upload_chart_png(chart_path, session_id, chart_title)
+            report_chart_records.append({
+                "title": chart_title,
+                "cloudinary_url": uploaded.get("secure_url"),
+                "cloudinary_public_id": uploaded.get("public_id"),
+                "fact_card": build_fact_card(chart_title),
+            })
+
+        report_model_card = {
+            "schema": model_results.get("schema") or {},
+            "dataset_summary": {
+                "rows": int(inspection.get("rows", len(cleaned_df))),
+                "target": detected_target or "not stored",
+                "best_model": model_results.get("best_model", "not stored"),
+            },
+        }
+        if report_asset.get("uploaded"):
+            report_model_card["report_asset"] = report_asset
+        else:
+            report_model_card["report_local_path"] = pdf_path
+        report_run_id = save_run_record(
+            filename=file.filename,
+            target=detected_target,
+            problem_type=model_results.get("problem_type"),
+            model_card=report_model_card,
+            charts=report_chart_records,
+            insights=[{"text": insights, "source": "llm" if os.getenv("GROQ_API_KEY", "").strip() else "rules"}],
+        )
+
+        with open(pdf_path, "rb") as report_file:
+            pdf_bytes = report_file.read()
+        if report_asset.get("uploaded"):
+            os.remove(pdf_path)
+
+        return Response(
+            content=pdf_bytes,
             media_type="application/pdf",
-            filename=f"AnchorIQ_{analysis_type}_Report_{session_id}.pdf"
+            headers={
+                "Content-Disposition": f'attachment; filename="AnchorIQ_{analysis_type}_Report_{session_id}.pdf"',
+                "X-AnchorIQ-Run-ID": str(report_run_id),
+            },
         )
 
     except HTTPException:

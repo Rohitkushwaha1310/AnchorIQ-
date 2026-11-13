@@ -64,6 +64,9 @@ Keep the language clear, assertive, and commercially oriented."""
 
     if GROQ_API_KEY and GROQ_API_KEY.strip() and not GROQ_API_KEY.startswith("your_"):
         candidate_models = [
+            os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip(),
+            "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
             "llama-3.3-70b-versatile",
             "llama-3.1-8b-instant",
             "llama3-70b-8192",

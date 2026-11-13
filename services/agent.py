@@ -6,7 +6,7 @@ import os
 import re
 from typing import Any
 
-from database.db import ChatMessage, SessionLocal, get_run
+from database.db import ChatMessage, SessionLocal, get_run, with_database_fallback
 from services.ab_testing import run_ab_test as calculate_ab_test
 from services.predictor import predict_single
 
@@ -107,12 +107,14 @@ def retrieve_relevant_items(question: str, run: dict, limit: int | None = None) 
     return selected
 
 
+@with_database_fallback
 def _save_message(run_id: int, role: str, content: str) -> None:
     with SessionLocal() as session:
         session.add(ChatMessage(run_id=int(run_id), role=role, content=content))
         session.commit()
 
 
+@with_database_fallback
 def _history(run_id: int) -> list[dict[str, str]]:
     with SessionLocal() as session:
         rows = (session.query(ChatMessage).filter(ChatMessage.run_id == int(run_id))
