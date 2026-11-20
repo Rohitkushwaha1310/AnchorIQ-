@@ -4,7 +4,9 @@
 # Python cache
 __pycache__/
 *.py[cod]
+*.pyc
 *$py.class
+.ipynb_checkpoints/
 
 # Virtual environments
 venv/
@@ -12,15 +14,26 @@ venv/
 env/
 
 # Generated runtime data and uploads
-uploads/
-charts/
-reports/
+uploads/*
+!uploads/.gitkeep
+charts/*
+!charts/.gitkeep
+reports/*
+!reports/.gitkeep
 
 # Trained machine learning model artifacts
-models/*.pkl
+models/*
+!models/.gitkeep
+*.pkl
+*.joblib
+
+# Generated root images
+/*.png
+*.png
 
 # Testing & IDE artifacts
 .pytest_cache/
 .vscode/
 .idea/
-*.png
+.mplconfig/
+test_persistence.sqlite
