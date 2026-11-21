@@ -1,6 +1,7 @@
+import io
 import os
 import time
-from typing import Optional
+from typing import Any, Optional
 
 
 def cloudinary_configured() -> bool:
@@ -31,15 +32,16 @@ def _configure_cloudinary():
         return False
 
 
-def upload_chart_png(file_path: str, run_id: str, title: str) -> dict:
-    if os.getenv('TESTING') or os.getenv('PYTEST_CURRENT_TEST') or not _configure_cloudinary():
+def upload_chart_png(file_or_bytes: Any, run_id: str, title: str) -> dict:
+    if os.getenv("TESTING") or os.getenv("PYTEST_CURRENT_TEST") or not _configure_cloudinary():
         return {"secure_url": None, "public_id": None, "uploaded": False}
 
     try:
         import cloudinary.uploader
 
+        upload_target = io.BytesIO(file_or_bytes) if isinstance(file_or_bytes, bytes) else file_or_bytes
         result = cloudinary.uploader.upload(
-            file_path,
+            upload_target,
             folder=f"anchoriq/{run_id}",
             public_id=title.replace(" ", "_").lower()[:80],
             resource_type="image",
@@ -53,7 +55,7 @@ def upload_chart_png(file_path: str, run_id: str, title: str) -> dict:
         return {"secure_url": None, "public_id": None, "uploaded": False}
 
 
-def upload_private_file(file_path: str, run_id: str, asset_name: str) -> dict:
+def upload_private_file(file_or_bytes: Any, run_id: str, asset_name: str) -> dict:
     """Store sensitive run artifacts as authenticated Cloudinary raw assets."""
     if os.getenv("TESTING") or os.getenv("PYTEST_CURRENT_TEST") or not _configure_cloudinary():
         return {"public_id": None, "uploaded": False}
@@ -61,12 +63,19 @@ def upload_private_file(file_path: str, run_id: str, asset_name: str) -> dict:
     try:
         import cloudinary.uploader
 
-        extension = os.path.splitext(file_path)[1].lower()
         stem = os.path.basename(asset_name or "asset")
+        if isinstance(file_or_bytes, (str, os.PathLike)):
+            extension = os.path.splitext(str(file_or_bytes))[1].lower()
+            upload_target = file_or_bytes
+        else:
+            extension = os.path.splitext(stem)[1].lower()
+            upload_target = io.BytesIO(file_or_bytes) if isinstance(file_or_bytes, bytes) else file_or_bytes
+
         if extension and not stem.lower().endswith(extension):
             stem = f"{stem}{extension}"
+
         result = cloudinary.uploader.upload(
-            file_path,
+            upload_target,
             folder=f"anchoriq/{run_id}/private",
             public_id=stem,
             resource_type="raw",

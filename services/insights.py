@@ -62,6 +62,9 @@ Keep the language clear, assertive, and commercially oriented."""
     if os.getenv("TESTING") or os.getenv("PYTEST_CURRENT_TEST"):
         return _rule_based_insights(inspection, model_results, target_name, analysis_type, top_5_features)
 
+    if os.getenv("TESTING") or os.getenv("PYTEST_CURRENT_TEST"):
+        return _rule_based_insights(inspection, model_results, target_name, analysis_type, top_5_features)
+
     if GROQ_API_KEY and GROQ_API_KEY.strip() and not GROQ_API_KEY.startswith("your_"):
         candidate_models = [
             os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip(),

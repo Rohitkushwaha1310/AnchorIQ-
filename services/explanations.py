@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import os
-os.environ.setdefault("MPLCONFIGDIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".mplconfig")))
+import io
+import tempfile
+os.environ.setdefault("MPLCONFIGDIR", os.path.join(tempfile.gettempdir(), "anchoriq_mplconfig"))
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
@@ -49,8 +51,9 @@ def explain_winning_model(
         model = getattr(pipeline, "named_steps", {}).get("model", pipeline)
         preprocessor = getattr(pipeline, "named_steps", {}).get("preprocessor", None)
 
-        # Cap background at 500 rows
-        n_sample = min(500, len(X))
+        # Cap sample at 100 rows for non-tree models and ensembles to stay within time budget
+        is_tree = is_tree_model(model)
+        n_sample = min(500 if is_tree else 100, len(X))
         X_sample = X.iloc[:n_sample].copy()
 
         if preprocessor is not None:
@@ -64,7 +67,7 @@ def explain_winning_model(
             X_trans = X_sample.select_dtypes(include=[np.number]).to_numpy()
             feature_names = list(X_sample.select_dtypes(include=[np.number]).columns)
 
-        if is_tree_model(model):
+        if is_tree:
             explainer = shap.TreeExplainer(model)
         else:
             explainer = shap.Explainer(model.predict, X_trans[:min(100, len(X_trans))])
@@ -83,14 +86,25 @@ def explain_winning_model(
             for i in indices
         ]
 
-        # Save summary chart
-        chart_path = os.path.join(charts_dir, "09_shap_summary.png").replace("\\", "/")
+        # Render summary chart directly to in-memory PNG buffer
+        buf = io.BytesIO()
         plt.figure(figsize=(9, 6))
         shap.summary_plot(vals, X_trans, feature_names=feature_names, show=False, max_display=10)
         plt.title("SHAP Feature Importance & Impact Summary", fontsize=12, fontweight="bold", pad=12)
         plt.tight_layout()
-        plt.savefig(chart_path, dpi=110, bbox_inches="tight")
+        plt.savefig(buf, format="png", dpi=110, bbox_inches="tight")
         plt.close()
+        buf.seek(0)
+        chart_bytes = buf.getvalue()
+
+        chart_path = None
+        if charts_dir and os.path.exists(charts_dir):
+            try:
+                chart_path = os.path.join(charts_dir, "09_shap_summary.png").replace("\\", "/")
+                with open(chart_path, "wb") as f:
+                    f.write(chart_bytes)
+            except Exception:
+                chart_path = None
 
         top_names = [d["feature"] for d in top_drivers[:3]]
         fact_card = {
@@ -104,6 +118,7 @@ def explain_winning_model(
             "applicable": True,
             "reason": None,
             "chart_path": chart_path,
+            "chart_bytes": chart_bytes,
             "top_drivers": top_drivers,
             "fact_card": fact_card,
         }

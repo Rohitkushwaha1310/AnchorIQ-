@@ -4,7 +4,11 @@ Shared in-memory DataFrame fixtures and test clients for pytest.
 """
 import io
 import os
-os.environ.setdefault("MPLCONFIGDIR", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".mplconfig"))
+import tempfile
+
+os.environ["TESTING"] = "1"
+os.environ["PYTEST_CURRENT_TEST"] = "1"
+os.environ.setdefault("MPLCONFIGDIR", os.path.join(tempfile.gettempdir(), "anchoriq_mplconfig"))
 import pytest
 import pandas as pd
 import numpy as np
@@ -15,8 +19,10 @@ from app.main import app
 
 @pytest.fixture
 def api_client():
-    """FastAPI TestClient fixture for invoking endpoints."""
-    return TestClient(app)
+    """FastAPI TestClient fixture for invoking endpoints with authentication."""
+    client = TestClient(app)
+    client.headers.update({"Authorization": "Bearer 00000000-0000-0000-0000-000000000001"})
+    return client
 
 
 @pytest.fixture

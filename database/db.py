@@ -1,23 +1,37 @@
+"""Database layer for AnchorIQ using SQLAlchemy.
+Connects to Supabase PostgreSQL in production, and isolated in-memory SQLite under tests.
+"""
+from __future__ import annotations
+
 import json
 import os
 import threading
-from functools import wraps
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from dotenv import load_dotenv
+from sqlalchemy import (
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    JSON,
+    String,
+    create_engine,
+)
 from sqlalchemy.exc import ArgumentError, NoSuchModuleError, SQLAlchemyError
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, JSON, String, create_engine
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 from sqlalchemy.pool import StaticPool
-from dotenv import load_dotenv
 
-
+# Load local environment configuration if .env exists
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
 def get_database_url() -> str:
-    if os.getenv("PYTEST_CURRENT_TEST"):
+    """Return in-memory SQLite URL during tests, or the configured PostgreSQL connection string."""
+    if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("TESTING"):
         return "sqlite:///:memory:"
 
     database_url = (
@@ -25,46 +39,32 @@ def get_database_url() -> str:
         or os.getenv("SUPABASE_DATABASE_URL", "").strip()
         or os.getenv("DATABASE_URL", "").strip()
     )
-    if database_url:
-        try:
-            from sqlalchemy.engine import make_url
+    if not database_url:
+        raise RuntimeError("Missing required SUPABASE_DB_URL environment variable for database connection.")
 
-            parsed = make_url(database_url)
-            if parsed.drivername.lower() in {"postgres", "postgresql"}:
-                parsed = parsed.set(drivername="postgresql+psycopg")
-            if parsed.drivername.startswith("postgresql") and not parsed.query.get("sslmode"):
-                parsed = parsed.update_query_dict({"sslmode": "require"})
-            database_url = parsed.render_as_string(hide_password=False)
-            if parsed.drivername and parsed.drivername.split(":", 1)[0].lower() in {
-                "sqlite",
-                "postgresql",
-                "postgresql+psycopg",
-                "postgresql+psycopg2",
-                "postgresql+pg8000",
-                "postgresql+asyncpg",
-                "mysql",
-                "mysql+pymysql",
-                "mariadb",
-                "oracle",
-                "mssql",
-                "mssql+pyodbc",
-                "duckdb",
-            }:
-                return database_url
-        except Exception as exc:
-            raise ArgumentError(f"Invalid database URL: {exc}") from exc
+    try:
+        from sqlalchemy.engine import make_url
 
-        raise ArgumentError("Unsupported database URL scheme")
-    return "sqlite:///./anchoriq_local.db"
+        parsed = make_url(database_url)
+        # Ensure psycopg driver is used for modern PostgreSQL connections
+        if parsed.drivername.lower() in {"postgres", "postgresql"}:
+            parsed = parsed.set(drivername="postgresql+psycopg")
+        if parsed.drivername.startswith("postgresql") and not parsed.query.get("sslmode"):
+            parsed = parsed.update_query_dict({"sslmode": "require"})
+        return parsed.render_as_string(hide_password=False)
+    except Exception as exc:
+        raise ArgumentError(f"Invalid database URL: {exc}") from exc
 
 
 Base = declarative_base()
 
 
 class Run(Base):
+    """Represents a single business analysis run, scoped to an authenticated user."""
     __tablename__ = "runs"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    user_id = Column(String, nullable=True, index=True)
     filename = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     target = Column(String, nullable=True)
@@ -78,6 +78,7 @@ class Run(Base):
 
 
 class Chart(Base):
+    """Represents a chart artifact associated with an analysis run."""
     __tablename__ = "charts"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
@@ -91,6 +92,7 @@ class Chart(Base):
 
 
 class Insight(Base):
+    """Represents an AI or rule-based business insight for a run."""
     __tablename__ = "insights"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
@@ -102,6 +104,7 @@ class Insight(Base):
 
 
 class ChatMessage(Base):
+    """Represents a conversation turn with AnchorIQ's business assistant."""
     __tablename__ = "chat_messages"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
@@ -114,6 +117,7 @@ class ChatMessage(Base):
 
 
 class Prediction(Base):
+    """Represents an ad-hoc prediction evaluation against a run's model."""
     __tablename__ = "predictions"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
@@ -126,6 +130,7 @@ class Prediction(Base):
 
 
 def _create_engine(database_url: str):
+    """Create a thread-safe SQLAlchemy engine configured for testing or pooling."""
     if database_url.startswith("sqlite:///:memory:"):
         return create_engine(
             database_url,
@@ -133,90 +138,63 @@ def _create_engine(database_url: str):
             connect_args={"check_same_thread": False},
             poolclass=StaticPool,
         )
-    if database_url.startswith("sqlite:"):
-        return create_engine(
-            database_url,
-            future=True,
-            connect_args={"check_same_thread": False, "timeout": 30},
-            pool_pre_ping=True,
-        )
     return create_engine(database_url, future=True, pool_pre_ping=True, pool_recycle=300)
-
-
-def _emergency_database_url() -> str:
-    path = Path(os.getenv("ANCHORIQ_EMERGENCY_DB_PATH", "./anchoriq_local.db")).expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return f"sqlite:///{path.as_posix()}"
 
 
 database_url = get_database_url()
 _test_database = database_url.startswith("sqlite:///:memory:")
-_fallback_reason: Optional[str] = None
-_engine_lock = threading.RLock()
 
-try:
-    engine = _create_engine(database_url)
-    _primary_configured = not _test_database and engine.dialect.name == "postgresql"
-except (NoSuchModuleError, ArgumentError) as exc:
-    _fallback_reason = f"Primary database configuration is invalid: {exc}"
-    engine = _create_engine("sqlite:///:memory:" if _test_database else _emergency_database_url())
-    _primary_configured = False
-
-if not _test_database and not _primary_configured and not _fallback_reason:
-    _fallback_reason = "Supabase PostgreSQL is not configured; using emergency SQLite storage"
-
+engine = _create_engine(database_url)
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
 
-def _activate_emergency_database(reason: str) -> None:
-    """Switch this process to SQLite after a Supabase connection/operation failure."""
-    global engine, _fallback_reason
-    with _engine_lock:
-        if engine.dialect.name == "sqlite":
-            return
-        emergency_engine = _create_engine(_emergency_database_url())
-        Base.metadata.create_all(bind=emergency_engine)
-        engine = emergency_engine
-        SessionLocal.configure(bind=engine)
-        _fallback_reason = reason[:500]
-        print(f"[WARN] Supabase unavailable; using emergency SQLite storage: {_fallback_reason}")
-
-
-def execute_with_fallback(operation):
-    """Run a database operation; retry once on emergency SQLite after a remote DB error."""
-    try:
-        return operation()
-    except SQLAlchemyError as exc:
-        if engine.dialect.name == "sqlite" or not _primary_configured:
-            raise
-        _activate_emergency_database(f"{type(exc).__name__}; remote database operation failed")
-        return operation()
-
-
 def with_database_fallback(function):
+    """Decorator maintaining backward-compatible helper execution."""
     @wraps(function)
     def wrapped(*args, **kwargs):
-        return execute_with_fallback(lambda: function(*args, **kwargs))
+        return function(*args, **kwargs)
     return wrapped
 
 
 def get_database_status() -> Dict[str, Any]:
-    backend = "sqlite-emergency" if engine.dialect.name == "sqlite" and not _test_database else (
-        "sqlite-test" if _test_database else "supabase-postgres"
-    )
+    """Check whether the active database backend is connected and return its status."""
+    backend = "sqlite-test" if _test_database else "supabase-postgres"
+    connected = False
+    try:
+        with engine.connect() as conn:
+            connected = True
+    except Exception:
+        connected = False
     return {
         "backend": backend,
-        "supabase_configured": _primary_configured,
-        "emergency_mode": backend == "sqlite-emergency",
-        "fallback_reason": _fallback_reason,
+        "supabase_configured": not _test_database,
+        "connected": connected,
     }
 
 
 def initialize_database() -> None:
-    execute_with_fallback(lambda: Base.metadata.create_all(bind=engine))
+    
+    Base.metadata.create_all(bind=engine)
+
+    
+    if not _test_database:
+        try:
+            from sqlalchemy import text
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE runs ADD COLUMN IF NOT EXISTS user_id VARCHAR(64);"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS idx_runs_user_id ON runs(user_id);"))
+                conn.commit()
+        except Exception:
+            pass
 
 
-def build_fact_card(title: str, local_path: Optional[str] = None, numbers: Optional[List[str]] = None, finding: Optional[str] = None) -> Dict[str, Any]:
+def build_fact_card(
+    title: str,
+    local_path: Optional[str] = None,
+    numbers: Optional[List[str]] = None,
+    finding: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Helper to assemble a standardized fact card dict."""
     fact = {
         "title": title,
         "numbers": numbers or [],
@@ -230,6 +208,7 @@ def build_fact_card(title: str, local_path: Optional[str] = None, numbers: Optio
 @with_database_fallback
 def save_run_record(
     *,
+    user_id: Optional[str] = None,
     filename: str,
     target: Optional[str] = None,
     problem_type: Optional[str] = None,
@@ -239,9 +218,11 @@ def save_run_record(
     chat_messages: Optional[List[Dict[str, Any]]] = None,
     predictions: Optional[List[Dict[str, Any]]] = None,
 ) -> int:
+    """Persist a completed analysis run and all related records with user ownership."""
     initialize_database()
     with SessionLocal() as session:
         run = Run(
+            user_id=str(user_id) if user_id else None,
             filename=filename,
             target=target,
             problem_type=problem_type,
@@ -296,6 +277,7 @@ def save_run_record(
 
 @with_database_fallback
 def save_prediction_record(run_id: int, inputs: Dict[str, Any], output: Dict[str, Any]) -> int:
+    """Persist a single prediction evaluation in the predictions table."""
     initialize_database()
     with SessionLocal() as session:
         pred = Prediction(
@@ -348,6 +330,7 @@ def _prediction_to_dict(prediction: Prediction) -> Dict[str, Any]:
 def _run_to_dict(run: Run) -> Dict[str, Any]:
     return {
         "id": run.id,
+        "user_id": run.user_id,
         "filename": run.filename,
         "created_at": run.created_at.isoformat() if run.created_at else None,
         "target": run.target,
@@ -361,48 +344,53 @@ def _run_to_dict(run: Run) -> Dict[str, Any]:
 
 
 @with_database_fallback
-def get_runs() -> List[Dict[str, Any]]:
+def get_runs(user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Return analysis runs, optionally filtered by the owner's user_id."""
     initialize_database()
     with SessionLocal() as session:
-        runs = session.query(Run).order_by(Run.created_at.desc()).all()
+        query = session.query(Run)
+        if user_id is not None:
+            query = query.filter(Run.user_id == str(user_id))
+        runs = query.order_by(Run.created_at.desc()).all()
         return [_run_to_dict(run) for run in runs]
 
 
 @with_database_fallback
-def get_run(run_id: int) -> Optional[Dict[str, Any]]:
+def get_run(run_id: int, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Fetch a run by ID; returns None if not found or if not owned by user_id."""
     initialize_database()
     with SessionLocal() as session:
         run = session.get(Run, run_id)
         if not run:
             return None
+        # Enforce strict user isolation: prevent cross-user access
+        if user_id is not None and run.user_id and str(run.user_id) != str(user_id):
+            return None
         return _run_to_dict(run)
 
 
 @with_database_fallback
-def delete_run_record(run_id: int) -> bool:
+def delete_run_record(run_id: int, user_id: Optional[str] = None) -> bool:
+    """Delete a run and associated Cloudinary assets; returns False if not found or unauthorized."""
     initialize_database()
     with SessionLocal() as session:
         run = session.get(Run, run_id)
         if not run:
             return False
+        if user_id is not None and run.user_id and str(run.user_id) != str(user_id):
+            return False
 
+        # Clean up Cloudinary chart images
         for chart in list(run.charts):
             public_id = chart.cloudinary_public_id
             if public_id:
                 try:
                     from services.cloudinary import delete_cloudinary_image
-
                     delete_cloudinary_image(public_id)
                 except Exception:
                     pass
-            fact_card = chart.fact_card or {}
-            local_path = fact_card.get("local_path")
-            if local_path and os.path.exists(local_path):
-                try:
-                    os.remove(local_path)
-                except Exception:
-                    pass
 
+        # Clean up Cloudinary private raw assets (models, datasets)
         model_card = run.model_card or {}
         for asset_key in ("model_asset", "dataset_asset", "report_asset"):
             asset = model_card.get(asset_key) or {}
@@ -410,15 +398,7 @@ def delete_run_record(run_id: int) -> bool:
             if public_id:
                 try:
                     from services.cloudinary import delete_private_file
-
                     delete_private_file(public_id)
-                except Exception:
-                    pass
-        for local_key in ("dataset_local_path", "report_local_path"):
-            local_path = model_card.get(local_key)
-            if local_path and os.path.exists(local_path):
-                try:
-                    os.remove(local_path)
                 except Exception:
                     pass
 

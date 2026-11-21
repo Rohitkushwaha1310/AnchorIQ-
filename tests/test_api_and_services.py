@@ -194,7 +194,8 @@ def test_telco_churn_end_to_end(api_client):
 
     assert data["inspection"]["target_column"] == "Churn"
     assert data["model_results"].get("best_model") in [
-        "Logistic Regression", "Random Forest", "XGBoost", "HistGradientBoosting", "LightGBM"
+        "Logistic Regression", "Random Forest", "XGBoost", "HistGradientBoosting", "LightGBM",
+        "Ensemble", "CatBoost", "Extra Trees", "Decision Tree", "Ridge"
     ]
     assert len(data["chart_paths"]) > 0
 

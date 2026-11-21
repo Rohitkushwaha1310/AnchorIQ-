@@ -13,17 +13,11 @@ venv/
 .venv/
 env/
 
-# Generated runtime data and uploads
-uploads/*
-!uploads/.gitkeep
-charts/*
-!charts/.gitkeep
-reports/*
-!reports/.gitkeep
-
-# Trained machine learning model artifacts
-models/*
-!models/.gitkeep
+# Generated runtime data, charts, models, and reports
+uploads/
+charts/
+reports/
+models/
 *.pkl
 *.joblib
 
@@ -37,3 +31,5 @@ models/*
 .idea/
 .mplconfig/
 test_persistence.sqlite
+anchoriq_local.db
+*.db

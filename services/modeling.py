@@ -664,21 +664,32 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
         "time_budget_seconds": budget, "subsampled": subsampled,
         "warnings": notes, "reliability_verdict": verdict,
     }
-    model_path = os.path.join(save_dir, f"{session_id}_model.pkl")
-    schema_path = os.path.join(save_dir, f"{session_id}_schema.json")
-    try:
-        joblib.dump({
-            "pipeline": calibrated_pipe, "raw_pipeline": best_pipe,
-            "features": list(X.columns), "numeric_cols": numeric_cols,
-            "categorical_cols": categorical_cols, "target": target,
-            "problem_type": problem_type, "threshold": threshold,
-            "classes": classes, "analysis_type": analysis_type,
-            "schema": schema, "model_card": model_card,
-        }, model_path)
-        with open(schema_path, "w", encoding="utf-8") as file:
-            json.dump(schema, file, indent=2, ensure_ascii=False)
-    except Exception as exc:
-        notes.append(f"Could not save model artifact or schema: {exc}")
+    bundle = {
+        "pipeline": calibrated_pipe, "raw_pipeline": best_pipe,
+        "features": list(X.columns), "numeric_cols": numeric_cols,
+        "categorical_cols": categorical_cols, "target": target,
+        "problem_type": problem_type, "threshold": threshold,
+        "classes": classes, "analysis_type": analysis_type,
+        "schema": schema, "model_card": model_card,
+    }
+
+    import io
+    bundle_buf = io.BytesIO()
+    joblib.dump(bundle, bundle_buf)
+    bundle_bytes = bundle_buf.getvalue()
+
+    model_path = None
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        model_path = os.path.join(save_dir, f"{session_id}_model.pkl")
+        schema_path = os.path.join(save_dir, f"{session_id}_schema.json")
+        try:
+            with open(model_path, "wb") as f:
+                f.write(bundle_bytes)
+            with open(schema_path, "w", encoding="utf-8") as file:
+                json.dump(schema, file, indent=2, ensure_ascii=False)
+        except Exception as exc:
+            notes.append(f"Could not save model artifact or schema: {exc}")
 
     lr_score = cv_results.get("Logistic Regression", {}).get("mean", cv_results.get("Ridge", {}).get("mean", 0.0))
     rf_score = cv_results.get("Random Forest", {}).get("mean", 0.0)
@@ -710,6 +721,7 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
         "min_cost": min_cost, "classification_report": report,
         "features_used": list(X.columns), "classes": classes,
         "model_path": model_path, "model_card": model_card,
+        "bundle": bundle, "bundle_bytes": bundle_bytes,
         "brier_score": brier, "leakage_warnings": leakage_warnings,
         "schema": schema, "mae": mae, "metric": metric,
     }

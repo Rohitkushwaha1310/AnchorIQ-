@@ -11,14 +11,37 @@ import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
+from pathlib import Path
+from dotenv import load_dotenv
 
-# Import internal services for seamless zero-downtime execution
-from services.cleaning import auto_clean
-from services.eda import auto_eda
-from services.insights import generate_insights
+# Ensure .env is loaded whether running locally or via different working directories
+_env_path = Path(__file__).resolve().parent / ".env"
+if _env_path.exists():
+    load_dotenv(dotenv_path=_env_path)
+else:
+    load_dotenv()
+
+
+def _get_config(key: str, default: str = "") -> str:
+    """Retrieve config from environment variables or Streamlit secrets."""
+    val = os.getenv(key)
+    if (not val or not str(val).strip()) and hasattr(st, "secrets"):
+        try:
+            val = st.secrets.get(key)
+        except Exception:
+            pass
+    return str(val or default).strip()
+
+
+# Configuration from environment variables / secrets
+API_URL = _get_config("API_URL", "http://localhost:8000").rstrip("/")
+SUPABASE_URL = _get_config("SUPABASE_URL", "").rstrip("/")
+if SUPABASE_URL and not (SUPABASE_URL.startswith("http://") or SUPABASE_URL.startswith("https://")):
+    SUPABASE_URL = f"https://{SUPABASE_URL}"
+SUPABASE_ANON_KEY = _get_config("SUPABASE_ANON_KEY", "")
+
+# Import lightweight inspection helper
 from services.inspection import inspect_dataset
-from services.modeling import auto_model
-from services.pdf_report import generate_pdf_report
 
 # Import unified styling system
 from ui.style import (
@@ -80,6 +103,114 @@ st.set_page_config(
 inject_custom_css()
 
 
+def api_request(method: str, endpoint: str, **kwargs) -> requests.Response:
+    """Send an authenticated request to the AnchorIQ backend with the Supabase Bearer token.
+    Automatically handles 401 session expirations and server connection failures.
+    """
+    token = st.session_state.get("auth_token")
+    headers = kwargs.pop("headers", {}) or {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    url = f"{API_URL}{endpoint}"
+    try:
+        resp = requests.request(method, url, headers=headers, **kwargs)
+        if resp.status_code == 401:
+            st.session_state.clear()
+            st.session_state["auth_error"] = "Your session expired. Please sign in again."
+            st.rerun()
+        return resp
+    except requests.exceptions.ConnectionError:
+        raise ConnectionError(
+            "The analysis server is not reachable. Please try again in a minute "
+            "(a free server may need up to a minute to wake up)."
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AUTHENTICATION SCREEN (Shown before anything else if not logged in)
+# ══════════════════════════════════════════════════════════════════════════════
+if "auth_token" not in st.session_state or not st.session_state["auth_token"]:
+    st.markdown("<div style='height: 48px;'></div>", unsafe_allow_html=True)
+    col_l, col_auth, col_r = st.columns([1, 1.4, 1])
+    with col_auth:
+        st.markdown(f"<h2 style='color:{PRIMARY_TEXT}; font-weight:600;'>⚓ AnchorIQ</h2>", unsafe_allow_html=True)
+        st.markdown(f"<p style='color:{SECONDARY_TEXT}; font-size:14px; margin-top:-8px;'>Autonomous Business Intelligence & Analytics</p>", unsafe_allow_html=True)
+
+        if "auth_error" in st.session_state and st.session_state["auth_error"]:
+            st.warning(st.session_state.pop("auth_error"))
+
+        auth_tab_in, auth_tab_up = st.tabs(["Sign In", "Create Account"])
+
+        with auth_tab_in:
+            with st.form("signin_form"):
+                in_email = st.text_input("Email", placeholder="you@company.com")
+                in_pwd = st.text_input("Password", type="password")
+                btn_signin = st.form_submit_button("Sign In", type="primary", use_container_width=True)
+
+                if btn_signin:
+                    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+                        st.error("Authentication service is not configured. Please set SUPABASE_URL and SUPABASE_ANON_KEY in your .env file or Streamlit secrets.")
+                    elif not in_email or not in_pwd:
+                        st.error("Please provide both email and password.")
+                    else:
+                        try:
+                            auth_resp = requests.post(
+                                f"{SUPABASE_URL}/auth/v1/token?grant_type=password",
+                                headers={"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"},
+                                json={"email": in_email.strip(), "password": in_pwd},
+                                timeout=15,
+                            )
+                            if auth_resp.status_code == 200:
+                                auth_data = auth_resp.json()
+                                st.session_state["auth_token"] = auth_data["access_token"]
+                                st.session_state["user_email"] = in_email.strip()
+                                st.session_state["user_id"] = auth_data["user"]["id"]
+                                st.rerun()
+                            else:
+                                err_msg = auth_resp.json().get("error_description") or auth_resp.json().get("msg") or "Invalid email or password."
+                                st.error(f"Sign in failed: {err_msg}")
+                        except Exception as e:
+                            st.error(f"Connection error: {e}")
+
+        with auth_tab_up:
+            with st.form("signup_form"):
+                up_email = st.text_input("Email", placeholder="you@company.com", key="reg_email")
+                up_pwd = st.text_input("Password (min 6 characters)", type="password", key="reg_pwd")
+                btn_signup = st.form_submit_button("Create Account", type="primary", use_container_width=True)
+
+                if btn_signup:
+                    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+                        st.error("Authentication service is not configured. Please set SUPABASE_URL and SUPABASE_ANON_KEY in your .env file or Streamlit secrets.")
+                    elif not up_email or not up_pwd:
+                        st.error("Please enter email and password.")
+                    elif len(up_pwd) < 6:
+                        st.error("Password must be at least 6 characters.")
+                    else:
+                        try:
+                            reg_resp = requests.post(
+                                f"{SUPABASE_URL}/auth/v1/signup",
+                                headers={"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"},
+                                json={"email": up_email.strip(), "password": up_pwd},
+                                timeout=15,
+                            )
+                            if reg_resp.status_code in (200, 201):
+                                reg_data = reg_resp.json()
+                                if reg_data.get("access_token"):
+                                    st.session_state["auth_token"] = reg_data["access_token"]
+                                    st.session_state["user_email"] = up_email.strip()
+                                    st.session_state["user_id"] = reg_data["user"]["id"]
+                                    st.rerun()
+                                else:
+                                    st.success("Account created! Check your email to confirm or sign in.")
+                            else:
+                                err_msg = reg_resp.json().get("msg") or reg_resp.json().get("error_description") or "Sign up failed."
+                                st.error(f"Sign up failed: {err_msg}")
+                        except Exception as e:
+                            st.error(f"Connection error: {e}")
+
+    st.stop()
+
+
 # ── Analysis Categories ───────────────────────────────────────────────────────
 ANALYSIS_TYPES = {
     "auto": {"label": "Auto Intelligence", "desc": "Autonomous problem type and driver detection"},
@@ -97,15 +228,13 @@ ANALYSIS_TYPES = {
 with st.sidebar:
     render_sidebar_header("AnchorIQ", "Autonomous Analytics Platform")
 
-    st.markdown("#### Execution Architecture")
-    engine_mode = st.radio(
-        "Engine Mode:",
-        ["Hybrid (Auto-Detect)", "Direct Engine (Embedded)", "FastAPI Backend (REST)"],
-        index=0,
-        help="AnchorIQ can run via high-speed in-memory engine or communicate with a FastAPI REST server.",
-    )
+    user_email_display = st.session_state.get("user_email", "Authenticated")
+    st.markdown(f"<div style='font-size:12px; color:{SIDEBAR_MUTED}; margin-bottom:4px;'>ACCOUNT</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='font-size:13px; color:{SIDEBAR_TEXT}; word-break:break-all;'>{user_email_display}</div>", unsafe_allow_html=True)
 
-    api_url = st.text_input("REST Endpoint", value="http://localhost:8000", help="FastAPI server URL")
+    if st.button("Sign out", use_container_width=True):
+        st.session_state.clear()
+        st.rerun()
 
     st.divider()
 
@@ -113,14 +242,14 @@ with st.sidebar:
     st.markdown("""
     - **Automated Ingestion**: Schema detection & validation
     - **Smart Imputation**: Type-safe missing value resolution
-    - **Exploratory Visualizations**: High-resolution statistical plots
+    - **Exploratory Visualizations**: Cloud-hosted high-resolution plots
     - **Tournament AutoML**: Benchmark of linear and tree models
     - **Executive Intelligence**: Decision synthesis and strategic summary
-    - **Exportable PDF**: Boardroom-ready intelligence report
+    - **On-Demand PDF**: Boardroom-ready intelligence report
     """)
 
     st.divider()
-    st.caption("AnchorIQ Analytics Engine | Editorial Edition")
+    st.caption("AnchorIQ Analytics Engine | Cloud Edition")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -245,95 +374,47 @@ if uploaded and analyze_btn:
     except Exception:
         df_raw = pd.DataFrame()
 
-    # Attempt execution
-    use_api = False
-    if "FastAPI" in engine_mode:
-        use_api = True
-    elif "Hybrid" in engine_mode:
-        try:
-            h_resp = requests.get(f"{api_url}/health", timeout=1.5)
-            if h_resp.status_code == 200:
-                use_api = True
-        except Exception:
-            use_api = False
-
+    # Dispatch to FastAPI REST Backend via authenticated Bearer token
     result = None
+    progress_bar.progress(20, text="Uploading dataset to analysis engine...")
 
-    if use_api:
-        progress_bar.progress(25, text="Dispatching to FastAPI REST Backend...")
-        try:
-            uploaded.seek(0)
-            data_payload = {"analysis_type": analysis_type}
-            if target_column_choice:
-                data_payload["target_column"] = target_column_choice
+    try:
+        uploaded.seek(0)
+        data_payload = {"analysis_type": analysis_type}
+        if target_column_choice:
+            data_payload["target_column"] = target_column_choice
 
-            api_res = requests.post(
-                f"{api_url}/analyze",
-                files={"file": (uploaded.name, uploaded.getvalue(), "application/octet-stream")},
-                data=data_payload,
-                timeout=240,
-            )
-            result = api_res.json()
-            result["engine_used"] = "FastAPI Backend (REST API)"
-            progress_bar.progress(100, text="Analysis finalized via FastAPI.")
-
-        except Exception as e:
-            st.warning(f"FastAPI connection issue ({e}). Switching to Embedded Direct Engine...")
-            use_api = False
-
-    if not use_api:
-        # Embedded Direct Engine Execution (Guaranteed Zero Network Failure)
-        progress_bar.progress(20, text="Cleaning and imputing dataset...")
-
-        # Step 1: Inspect
-        inspection = inspect_dataset(df_raw, analysis_type=analysis_type, target_column=target_column_choice)
-        target = inspection["target_column"]
-
-        # Step 2: Clean
-        df_clean, clean_report = auto_clean(df_raw.copy())
-
-        # Step 3: EDA
-        progress_bar.progress(50, text="Generating exploratory visualizations...")
-        chart_dir = f"charts/{session_id}"
-        chart_paths = auto_eda(df_clean, target=target, analysis_type=analysis_type, save_dir=chart_dir)
-
-        # Step 4: ML Modeling
-        progress_bar.progress(75, text="Training candidate machine learning models...")
-        model_results = {}
-        if target:
-            model_results = auto_model(df_clean.copy(), target=target, analysis_type=analysis_type)
-
-        # Step 5: Insights
-        progress_bar.progress(90, text="Formulating executive insights...")
-        insights = generate_insights(
-            inspection=inspection,
-            model_results=model_results,
-            target=target or "outcome",
-            analysis_type=analysis_type,
-            feature_importance=model_results.get("feature_importance", {}),
+        progress_bar.progress(45, text="Running autonomous data pipeline, model tournaments & insights...")
+        api_res = api_request(
+            "POST",
+            "/analyze",
+            files={"file": (uploaded.name, uploaded.getvalue(), "application/octet-stream")},
+            data=data_payload,
+            timeout=240,
         )
-
-        result = {
-            "filename": uploaded.name,
-            "session_id": session_id,
-            "analysis_type": analysis_type,
-            "inspection": inspection,
-            "cleaning": clean_report,
-            "chart_paths": chart_paths,
-            "chart_urls": chart_paths,
-            "model_results": model_results,
-            "insights": insights,
-            "engine_used": "Direct Autonomous Engine",
-        }
-        progress_bar.progress(100, text="Analysis complete.")
+        if api_res.status_code == 200:
+            result = api_res.json()
+            result["engine_used"] = "FastAPI Backend (Cloud REST API)"
+            progress_bar.progress(100, text="Analysis finalized successfully.")
+        else:
+            try:
+                err_detail = api_res.json().get("detail") or api_res.json().get("error") or api_res.text
+            except Exception:
+                err_detail = api_res.text
+            st.error(f"Analysis failed ({api_res.status_code}): {err_detail}")
+            progress_bar.empty()
+    except ConnectionError as ce:
+        st.error(str(ce))
+        progress_bar.empty()
+    except Exception as e:
+        st.error(f"Analysis request error: {e}")
+        progress_bar.empty()
 
     if result and "error" not in result:
         st.session_state["result"] = result
         st.session_state["analysis_type"] = analysis_type
         st.session_state["uploaded_file_bytes"] = uploaded.getvalue()
         st.session_state["uploaded_file_name"] = uploaded.name
-        if "df_clean" in locals():
-            st.session_state["df_clean"] = df_clean
         if "df_raw" in locals():
             st.session_state["df_raw"] = df_raw
         st.success("Analysis generated successfully.")
@@ -350,7 +431,12 @@ if "result" in st.session_state:
     insp = res.get("inspection", {})
     ml = res.get("model_results", {})
     clean = res.get("cleaning", {})
-    chart_paths = res.get("chart_paths", [])
+    chart_paths = (
+        res.get("chart_paths")
+        or res.get("chart_urls")
+        or res.get("charts")
+        or []
+    )
     engine_used = res.get("engine_used", "Autonomous Engine")
 
     t_name = ANALYSIS_TYPES.get(analysis_type, {}).get("label", "Analysis")
@@ -457,16 +543,22 @@ if "result" in st.session_state:
             "Domain Risk & Specialized Visualizations",
         ]
 
-        valid_charts = [p for p in chart_paths if os.path.exists(p)]
+        valid_charts = []
+        for c in chart_paths:
+            url = c.get("cloudinary_url") if isinstance(c, dict) else c
+            title = c.get("title") if isinstance(c, dict) else None
+            if url and (str(url).startswith(("http://", "https://")) or os.path.exists(str(url))):
+                valid_charts.append((url, title))
+
         if valid_charts:
             col_c1, col_c2 = st.columns(2, gap="large")
-            for i, p in enumerate(valid_charts):
+            for i, (chart_src, custom_title) in enumerate(valid_charts):
                 container = col_c1 if i % 2 == 0 else col_c2
-                lbl = chart_labels[i] if i < len(chart_labels) else f"Visual Analysis {i+1}"
+                lbl = custom_title or (chart_labels[i] if i < len(chart_labels) else f"Visual Analysis {i+1}")
                 with container:
                     st.markdown(f"**{i+1}. {lbl}**")
                     st.markdown("<div class='chart-container'>", unsafe_allow_html=True)
-                    safe_image(p, use_container_width=True)
+                    safe_image(chart_src, use_container_width=True)
                     st.markdown("</div>", unsafe_allow_html=True)
         else:
             st.info("No charts generated.")
@@ -654,30 +746,30 @@ if "result" in st.session_state:
         - **Executive Recommendations & Strategic Synthesis**
         """)
 
-        pdf_path = f"reports/AnchorIQ_{analysis_type}_{res.get('session_id', 'export')}.pdf"
+        run_id_val = res.get("run_id") or res.get("session_id")
+        pdf_state_key = f"pdf_bytes_{run_id_val}"
 
         if safe_button("Render Executive PDF", type="primary", use_container_width=True):
-            with st.spinner("Building PDF document..."):
+            with st.spinner("Building executive PDF in memory..."):
                 try:
-                    generated_pdf = generate_pdf_report(
-                        result=res,
-                        chart_paths=chart_paths,
-                        output_path=pdf_path,
-                    )
-                    if os.path.exists(generated_pdf):
-                        with open(generated_pdf, "rb") as f:
-                            pdf_bytes = f.read()
-
+                    pdf_resp = api_request("GET", f"/runs/{run_id_val}/report", timeout=45)
+                    if pdf_resp.status_code == 200:
+                        st.session_state[pdf_state_key] = pdf_resp.content
                         st.success("Executive PDF generated successfully.")
-                        st.download_button(
-                            label="Download PDF Report",
-                            data=pdf_bytes,
-                            file_name=f"AnchorIQ_{analysis_type}_Executive_Report.pdf",
-                            mime="application/pdf",
-                            use_container_width=True,
-                        )
+                    else:
+                        st.error(f"Failed to generate report ({pdf_resp.status_code}): {pdf_resp.text}")
                 except Exception as e:
                     st.error(f"Error generating PDF: {e}")
+
+        cached_pdf = st.session_state.get(pdf_state_key)
+        if cached_pdf:
+            st.download_button(
+                label="Download PDF Report",
+                data=cached_pdf,
+                file_name=f"AnchorIQ_{analysis_type}_Executive_Report_{run_id_val}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
 
         st.divider()
         st.markdown("#### Report Summary Metadata")
@@ -748,18 +840,13 @@ if "result" in st.session_state:
                         "group_column": group_col_selected,
                         "metric_column": metric_col_selected,
                     }
-                    r_post = requests.post(f"{api_url}/ab_test", json=payload, timeout=8)
+                    r_post = api_request("POST", "/ab_test", json=payload, timeout=20)
                     if r_post.status_code == 200:
                         ab_result = r_post.json()
-                except Exception:
-                    pass
-
-                if not ab_result and current_df is not None:
-                    from services.ab_testing import run_ab_test
-                    try:
-                        ab_result = run_ab_test(df=current_df, group_column=group_col_selected, metric_column=metric_col_selected)
-                    except Exception as abe:
-                        st.error(f"A/B test calculation error: {abe}")
+                    else:
+                        st.error(f"A/B test returned error ({r_post.status_code}): {r_post.text}")
+                except Exception as abe:
+                    st.error(f"A/B test error: {abe}")
 
                 if ab_result:
                     is_sig = ab_result.get("significant", False)
@@ -809,7 +896,7 @@ if "result" in st.session_state:
         run_id_val = res.get("run_id") or res.get("session_id")
         schema = None
         try:
-            r_schema = requests.get(f"{api_url}/predict/schema/{run_id_val}", timeout=5)
+            r_schema = api_request("GET", f"/predict/schema/{run_id_val}", timeout=10)
             if r_schema.status_code == 200:
                 schema = r_schema.json()
         except Exception:
@@ -857,20 +944,13 @@ if "result" in st.session_state:
                 with st.spinner("Evaluating model inference and explanatory drivers..."):
                     pred_res = None
                     try:
-                        r_pred = requests.post(f"{api_url}/predict/{run_id_val}", json=input_fields, timeout=10)
+                        r_pred = api_request("POST", f"/predict/{run_id_val}", json=input_fields, timeout=20)
                         if r_pred.status_code == 200:
                             pred_res = r_pred.json()
                         else:
                             st.error(f"Prediction failed ({r_pred.status_code}): {r_pred.text}")
-                    except Exception:
-                        pass
-
-                    if not pred_res:
-                        from services.predictor import predict_single
-                        try:
-                            pred_res = predict_single(session_id=run_id_val, input_data=input_fields)
-                        except Exception as pe:
-                            st.error(f"Prediction error: {pe}")
+                    except Exception as pe:
+                        st.error(f"Prediction error: {pe}")
 
                     if pred_res:
                         st.divider()
@@ -958,8 +1038,9 @@ if "result" in st.session_state:
                 if question:
                     st.session_state[chat_key].append({"role": "user", "content": question})
                     try:
-                        response = requests.post(
-                            f"{api_url}/chat/{run_id_val}",
+                        response = api_request(
+                            "POST",
+                            f"/chat/{run_id_val}",
                             json={"question": question, "inputs": inputs},
                             timeout=30,
                         )
