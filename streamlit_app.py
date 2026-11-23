@@ -390,7 +390,7 @@ if uploaded and analyze_btn:
             "/analyze",
             files={"file": (uploaded.name, uploaded.getvalue(), "application/octet-stream")},
             data=data_payload,
-            timeout=240,
+            timeout=360,
         )
         if api_res.status_code == 200:
             result = api_res.json()
