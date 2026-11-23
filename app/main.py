@@ -69,7 +69,7 @@ def _validate_backend_env() -> None:
 _validate_backend_env()
 
 from services.ab_testing import run_ab_test
-from services.agent import ask_business_question
+from services.agent import ask_business_question, make_analysis_snapshot
 from services.cleaning import auto_clean
 from services.cloudinary import (
     cloudinary_configured,
@@ -476,6 +476,7 @@ async def analyze(
             "session_id": session_id,
             "schema": model_results.get("schema") or {str(col): str(dtype) for col, dtype in cleaned_df.dtypes.items()},
             "model_asset": model_asset,
+            "analysis_snapshot": make_analysis_snapshot(model_results, inspection, cleaning_report),
             "dataset_asset": dataset_asset,
             "dataset_summary": {
                 "rows": int(inspection.get("rows", len(cleaned_df))),
