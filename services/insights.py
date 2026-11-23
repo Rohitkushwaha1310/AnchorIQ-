@@ -57,7 +57,8 @@ Please generate an executive business report in clean markdown adhering strictly
 ## Predicted Impact
 (Quantified expected business improvements, revenue lift, churn reduction, or cost savings)
 
-Keep the language clear, assertive, and commercially oriented."""
+Keep the language clear, assertive, and commercially oriented. but make sure everything should be wriitenin simple english so that also a not data analysis can understand it
+and also if you use any technical teanr explain it so that evronne can understand it """
 
     if os.getenv("TESTING") or os.getenv("PYTEST_CURRENT_TEST"):
         return _rule_based_insights(inspection, model_results, target_name, analysis_type, top_5_features)

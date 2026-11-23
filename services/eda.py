@@ -103,13 +103,31 @@ def auto_eda(
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         fig.suptitle(f"Features vs {target}", fontsize=14, fontweight="bold")
         axes = axes.flatten()
+
+        # Safely convert binary categorical string target (e.g. Yes/No, Churn) to numeric 0/1 rate
+        target_series = df[target]
+        pos_label = target
+        if not pd.api.types.is_numeric_dtype(target_series):
+            uniques = [u for u in target_series.dropna().unique()]
+            if len(uniques) == 2:
+                pos_vals = {"yes", "true", "1", "churn", "positive", "y", "default", "attrition"}
+                pos_candidates = [u for u in uniques if str(u).lower().strip() in pos_vals]
+                pos_val = pos_candidates[0] if pos_candidates else uniques[0]
+                pos_label = str(pos_val)
+                target_numeric = (target_series == pos_val).astype(float)
+            else:
+                target_numeric = pd.to_numeric(target_series, errors="coerce")
+        else:
+            target_numeric = target_series.astype(float)
+
         for i, col in enumerate(cols):
             try:
-                mean_rate = df.groupby(col)[target].mean() * 100
+                temp_df = pd.DataFrame({"feature": df[col], "target": target_numeric}).dropna()
+                mean_rate = temp_df.groupby("feature")["target"].mean() * 100
                 axes[i].bar(mean_rate.index.astype(str), mean_rate.values, color="#1F6B58")
                 axes[i].set_title(f"{col} vs {target}")
                 axes[i].tick_params(axis="x", rotation=15)
-                axes[i].set_ylabel(f"{target} rate %")
+                axes[i].set_ylabel(f"{pos_label} rate %" if pos_label != target else f"{target} mean")
             except Exception:
                 pass
         for j in range(n, 4):
