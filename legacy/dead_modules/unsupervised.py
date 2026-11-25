@@ -83,18 +83,16 @@ def anomalies(df: pd.DataFrame, info: dict, top_n: int = 10):
         return None
     X = df[num].apply(pd.to_numeric, errors="coerce")
     X = X.fillna(X.median())
-    # 1) explainable single-column extremes (robust z-score, resistant to the outliers themselves)
     med = X.median()
     mad = (X - med).abs().median().replace(0, np.nan)
     sd = X.std().replace(0, 1)
     rz = ((X - med) / (1.4826 * mad)).fillna((X - med) / sd)
     zmax = rz.abs().max(axis=1).values
     extreme = zmax > 8
-    # 2) multivariate oddities
     iso = IsolationForest(n_estimators=200, contamination=0.02, random_state=0).fit(X)
     score = -iso.score_samples(X)
     flag = (iso.predict(X) == -1) | extreme
-    order = np.lexsort((-score, -extreme.astype(int)))  # extremes first, then by isolation score
+    order = np.lexsort((-score, -extreme.astype(int)))
     rows = []
     for i in order[:top_n]:
         col = rz.iloc[i].abs().idxmax()
@@ -120,7 +118,6 @@ def forecast(df: pd.DataFrame, time_col: str, metric: str, horizon: int | None =
         freq, season, label = "W", 52 if span_days > 730 else 0, "week"
     else:
         freq, season, label = "MS", 12, "month"
-    # one absurd value must not create a fake spike/trend in a period total
     hi_cap, lo_cap = d[metric].quantile(0.995), d[metric].quantile(0.005)
     capped = int(((d[metric] > hi_cap) | (d[metric] < lo_cap)).sum())
     if capped and (d[metric].max() > 3 * max(abs(hi_cap), 1e-9) or d[metric].min() < 3 * min(lo_cap, -1e-9) * -1 and False):
@@ -134,7 +131,7 @@ def forecast(df: pd.DataFrame, time_col: str, metric: str, horizon: int | None =
     full = pd.period_range(g.index.min(), g.index.max(), freq=pcode)
     g = g.reindex(full)
     g = g.fillna(0) if agg == "sum" else g.interpolate()
-    if freq != "D":  # a half-finished first/last period would look like a fake rise/drop
+    if freq != "D":
         if d[time_col].max().normalize() < full[-1].end_time.normalize():
             g = g.iloc[:-1]
         if len(g) and d[time_col].min().normalize() > full[0].start_time.normalize():

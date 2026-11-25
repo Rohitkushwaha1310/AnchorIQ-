@@ -22,7 +22,6 @@ def auth_client():
 
 def test_auth_token_required_on_all_endpoints(auth_client):
     """Verify that requests without an Authorization header return HTTP 401."""
-    # Test protected endpoints
     endpoints = [
         ("GET", "/runs"),
         ("GET", "/runs/999999"),
@@ -50,7 +49,6 @@ def test_user_isolation_between_two_users(small_normal_df):
 
     client = TestClient(app)
 
-    # 1. User A logs in and creates a run
     app.dependency_overrides[get_current_user] = lambda: user_a
     csv_bytes = df_to_csv_bytes(small_normal_df)
 
@@ -62,18 +60,14 @@ def test_user_isolation_between_two_users(small_normal_df):
     assert res_create.status_code == 200, res_create.text
     run_a_id = res_create.json()["run_id"]
 
-    # User A lists runs -> must include run_a_id
     runs_a = client.get("/runs").json()["runs"]
     assert any(r["id"] == run_a_id for r in runs_a)
 
-    # 2. Switch to User B
     app.dependency_overrides[get_current_user] = lambda: user_b
 
-    # User B lists runs -> must NOT include run_a_id
     runs_b = client.get("/runs").json()["runs"]
     assert not any(r["id"] == run_a_id for r in runs_b)
 
-    # User B attempts to access User A's run on all endpoints -> must return 404 (not 403)
     resp_get = client.get(f"/runs/{run_a_id}")
     assert resp_get.status_code == 404
 
@@ -95,8 +89,12 @@ def test_user_isolation_between_two_users(small_normal_df):
     resp_del = client.delete(f"/runs/{run_a_id}")
     assert resp_del.status_code == 404
 
-    # 3. Clean up overrides and delete User A's run as User A
     app.dependency_overrides[get_current_user] = lambda: user_a
+    rep_res = client.get(f"/runs/{run_a_id}/report")
+    assert rep_res.status_code == 200
+    assert rep_res.headers.get("content-type") == "application/pdf"
+    assert rep_res.content.startswith(b"%PDF")
+
     del_res = client.delete(f"/runs/{run_a_id}")
     assert del_res.status_code == 200
     app.dependency_overrides.clear()
@@ -108,7 +106,6 @@ def test_no_local_disk_write_during_analyze(small_normal_df):
     app.dependency_overrides[get_current_user] = lambda: user_id
     client = TestClient(app)
 
-    # Snapshot current working directory state before analysis
     prohibited_folders = ["charts", "models", "reports", "uploads"]
     for folder in prohibited_folders:
         assert not os.path.exists(folder), f"Folder '{folder}' should not exist before analysis."
@@ -121,11 +118,9 @@ def test_no_local_disk_write_during_analyze(small_normal_df):
     )
     assert res.status_code == 200, res.text
 
-    # Verify none of the ephemeral prohibited folders were created
     for folder in prohibited_folders:
         assert not os.path.exists(folder), f"Folder '{folder}' was created on local disk during /analyze!"
 
-    # Clean up
     run_id = res.json()["run_id"]
     client.delete(f"/runs/{run_id}")
     app.dependency_overrides.clear()
@@ -141,7 +136,6 @@ def test_public_health_endpoint(auth_client):
     assert "database" in data
     assert "cloudinary" in data
     assert "groq" in data
-    # Ensure no URLs or credentials appear in health output
     text = str(data)
     assert "postgres" not in text
     assert "key" not in text

@@ -5,7 +5,6 @@ Defines design tokens, helper functions, and custom CSS overrides strictly avoid
 
 import streamlit as st
 
-# ── DESIGN TOKENS ─────────────────────────────────────────────────────────────
 PAGE_BG = "#F2F1EC"
 SURFACE = "#FFFFFF"
 BORDER = "#E7E4DB"

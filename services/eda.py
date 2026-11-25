@@ -52,7 +52,6 @@ def auto_eda(
     if target in cat_cols:
         cat_cols.remove(target)
 
-    # Chart 1: Feature Distributions
     if nums_cols:
         cols = nums_cols[:6]
         n = len(cols)
@@ -67,7 +66,6 @@ def auto_eda(
         plt.tight_layout()
         charts.append(_save_or_buffer(fig, "Feature Distributions", save_dir, "01_distribution.png"))
 
-    # Chart 2: Correlation Heatmap
     if len(nums_cols) >= 2:
         corr_cols = nums_cols[:10]
         if target and target in df.columns:
@@ -79,7 +77,6 @@ def auto_eda(
         plt.tight_layout()
         charts.append(_save_or_buffer(fig, "Correlation Heatmap", save_dir, "02_correlation.png"))
 
-    # Chart 3: Target Distribution
     if target and target in df.columns:
         fig, ax = plt.subplots(figsize=(8, 5))
         if df[target].nunique() <= 10:
@@ -96,15 +93,14 @@ def auto_eda(
         plt.tight_layout()
         charts.append(_save_or_buffer(fig, "Target Distribution", save_dir, "03_target.png"))
 
-    # Chart 4: Categorical Impact vs Target
     if target and cat_cols:
-        n = min(len(cat_cols), 4)
-        cols = cat_cols[:n]
+        meaningful_cats = [c for c in cat_cols if 2 <= df[c].nunique(dropna=True) <= 20]
+        cols = meaningful_cats[:4] if meaningful_cats else [c for c in cat_cols if df[c].nunique(dropna=True) > 1][:4]
+        n = len(cols)
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         fig.suptitle(f"Features vs {target}", fontsize=14, fontweight="bold")
         axes = axes.flatten()
 
-        # Safely convert binary categorical string target (e.g. Yes/No, Churn) to numeric 0/1 rate
         target_series = df[target]
         pos_label = target
         if not pd.api.types.is_numeric_dtype(target_series):
@@ -135,7 +131,6 @@ def auto_eda(
         plt.tight_layout()
         charts.append(_save_or_buffer(fig, "Categorical Impact", save_dir, "04_categorical_vs_target.png"))
 
-    # Chart 5: Numerical Boxplots
     if nums_cols and target:
         cols = nums_cols[:4]
         fig, axes = plt.subplots(2, 2, figsize=(12, 8))

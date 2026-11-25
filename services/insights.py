@@ -139,7 +139,8 @@ def _rule_based_insights(inspection: dict,
 AnchorIQ conducted an autonomous diagnostic across {rows:,} enterprise records with {cols} monitored metrics, evaluating performance on **{target}**. The optimal predictive champion is **{best_model}** with a validated {metric_name} of **{metric_val}**, demonstrating strong predictive signal suitable for commercial deployment. Strategic interventions targeting {primary_driver} will produce immediate positive leverage on bottom-line outcomes.
 
 ## Top 3 Key Findings
-1. **Primary KPI Driver Identified:** Analysis proves that **{primary_driver}** represents the single strongest influence on {target}, accounting for the majority of observed variance across client segments.
+1. **Primary KPI Driver Identified:** Analysi
+s proves that **{primary_driver}** represents the single strongest influence on {target}, accounting for the majority of observed variance across client segments.
 2. **Predictive Performance Benchmarking:** The {best_model} architecture demonstrated superior stability across cross-validation folds, confirming that automated pattern discovery is robust and non-random.
 3. **Data Quality & Integrity Health:** Processed and audited {rows:,} records with zero critical null leakages remaining, ensuring that decision-support models reflect verified historical reality.
 

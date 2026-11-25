@@ -35,7 +35,6 @@ def inspect_dataset(df: pd.DataFrame, analysis_type: str = "auto", target_column
     missing_cols = {str(k): int(v) for k, v in missing_per_col[missing_per_col > 0].items()}
     duplicates = int(df.duplicated().sum())
 
-    # Detect high-cardinality ID / identifier columns
     id_cols = []
     for col in df.columns:
         c_lower = col.lower()
@@ -43,18 +42,12 @@ def inspect_dataset(df: pd.DataFrame, analysis_type: str = "auto", target_column
             if df[col].nunique(dropna=True) / max(n_rows, 1) > 0.6:
                 id_cols.append(col)
 
-    # Target column smart auto-detection:
-    # Priority 1: user-provided target_column
-    # Priority 2: analysis_type keyword match
-    # Priority 3: generic names (target, label, class, outcome, result, status)
-    # Priority 4: last column with 2-10 unique values
     target = None
     if target_column and target_column in df.columns:
         target = target_column
     else:
         target = _detect_target(df, analysis_type, exclude_cols=id_cols)
 
-    # Problem type & Target info
     target_info = {}
     problem_type = "classification"
     if target and target in df.columns:
@@ -72,10 +65,8 @@ def inspect_dataset(df: pd.DataFrame, analysis_type: str = "auto", target_column
         else:
             problem_type = "classification"
     else:
-        # Default fallback
         problem_type = "classification"
 
-    # Stats per numerical column
     stats = {}
     for col in numerical_cols:
         s = df[col].dropna()
@@ -116,7 +107,6 @@ def _detect_target(df: pd.DataFrame, analysis_type: str = "auto", exclude_cols: 
     candidates = [c for c in df.columns if c not in exclude]
     lower_cols = {c.lower(): c for c in candidates}
 
-    # Priority 2: analysis_type keyword match
     type_keywords = {
         "churn": ["churn", "churned", "attrition", "left"],
         "sales": ["revenue", "sales", "amount", "profit"],
@@ -128,25 +118,21 @@ def _detect_target(df: pd.DataFrame, analysis_type: str = "auto", exclude_cols: 
         if kw in lower_cols:
             return lower_cols[kw]
 
-    # Priority 3: generic names (target, label, class, outcome, result, status)
     generic_names = ["target", "label", "class", "outcome", "result", "status"]
     for g in generic_names:
         if g in lower_cols:
             return lower_cols[g]
 
-    # Check common synonyms if analysis_type was auto
     auto_fallbacks = ["churn", "fraud", "attrition", "sales", "revenue"]
     for af in auto_fallbacks:
         if af in lower_cols:
             return lower_cols[af]
 
-    # Priority 4: last column with 2-10 unique values
     for col in reversed(candidates):
         n_u = df[col].nunique(dropna=True)
         if 2 <= n_u <= 10:
             return col
 
-    # Fallback to last column if available
     if candidates:
         return candidates[-1]
 

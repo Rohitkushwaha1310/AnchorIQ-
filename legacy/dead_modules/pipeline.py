@@ -30,7 +30,6 @@ def run_analysis(df_raw: pd.DataFrame, filename: str = "data", analysis_type: st
     models_dir = os.path.join(base_dir, "models")
     os.makedirs(reports_dir, exist_ok=True)
 
-    # 1 ── understand the raw data, find the target, drop unlabeled rows
     _, first = profile(df_raw, analysis_type, target_column)
     target = first["target"]
     inspection = inspect_dataset(df_raw, analysis_type=analysis_type, target_column=target)
@@ -38,12 +37,10 @@ def run_analysis(df_raw: pd.DataFrame, filename: str = "data", analysis_type: st
     if target:
         work = df_raw[df_raw[target].notna()]
 
-    # 2 ── clean, then profile the cleaned frame
     df_clean, clean_report = auto_clean(work.copy())
     df_clean, info = profile(df_clean, analysis_type, target)
     info["target_confidence"], info["target_reason"] = first["target_confidence"], first["target_reason"]
 
-    # 3 ── analyses
     model, scored = ({}, None)
     if "supervised" in info["plan"]:
         model, scored = auto_model(df_clean, info, save_path=os.path.join(models_dir, f"{session_id}.pkl"))
@@ -56,11 +53,9 @@ def run_analysis(df_raw: pd.DataFrame, filename: str = "data", analysis_type: st
         except Exception as e:
             print(f"[WARN] forecast failed: {e}")
 
-    # 4 ── facts -> insights
     facts = build_facts(df_clean, info, model, scored, seg, anom, fc, analysis_type, filename)
     insights = generate_insights(facts, analysis_type)
 
-    # 5 ── charts: interactive (UI) + static PNG (PDF report)
     plotly_charts = build_charts(df_clean, info, model, scored, seg, fc, facts)
     eda_df = df_clean.copy()
     if info["problem_type"] == "classification" and model.get("positive_label") is not None:
@@ -71,7 +66,6 @@ def run_analysis(df_raw: pd.DataFrame, filename: str = "data", analysis_type: st
         print(f"[WARN] PNG charts failed: {e}")
         chart_paths = []
 
-    # 6 ── enriched dataset for download
     out = df_clean.copy()
     if scored is not None:
         extra = [c for c in scored.columns if c not in out.columns]

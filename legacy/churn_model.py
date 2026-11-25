@@ -29,7 +29,6 @@ df['Churn_Binary'] = (df['Churn'] == 'Yes').astype(int)
 
 print(f"✅ Loaded: {df.shape}")
 
-# feature enginnering 
 
 df['ChargesPerTenure'] = df['TotalCharges']/(df['tenure']+1)
 df['Isnewcustomer'] = (df['tenure']< 12).astype(int)
@@ -42,12 +41,10 @@ df['ServiceCount']= (df[service_cols]== 'Yes').sum(axis=1)
 
 
 
-# high value customer
 df['Ishighvalue'] = (
     df['MonthlyCharges'] > df['MonthlyCharges'].median()
 ).astype(int)
 
-#contact risk
 contract_map = {
     'Month-to-month' : 3,
     'One year': 2,
@@ -58,7 +55,6 @@ contract_map = {
 df['ContractRisk'] = df['Contract'].map(contract_map)
 
 
-# auto pay
 
 df['Isautopay']= df['PaymentMethod'].isin([
     'Bank transfer (automatic)', 
@@ -74,7 +70,6 @@ print(f"Manual pay churn    : {df.groupby('Isautopay')['Churn_Binary'].mean()[0]
 print(f"High value churn    : {df.groupby('Ishighvalue')['Churn_Binary'].mean()[1]*100:.1f}%")
 print(f"Final shape         : {df.shape}")
 
-#visualisationn 
 fig, axes = plt.subplots(2,3, figsize =(12, 6))
 fig.suptitle('AnchorIQ feature anaylysis', fontsize =16)
 
@@ -92,7 +87,6 @@ for i,v in enumerate(new_churn.values):
        ha='center', fontweight='bold')
 
 
-#contract type
 risk_churn = df.groupby('Contract')['Churn_Binary'].mean()*100
 axes[0,1].bar(risk_churn.index, risk_churn.values,
                color=['#e74c3c','#f39c12','#2ecc71'])
@@ -100,7 +94,6 @@ axes[0,1].set_title('Churn by Contract')
 axes[0,1].tick_params(axis='x', rotation=15)
 
 
-#service count 
 service_churn = df.groupby('ServiceCount')['Churn_Binary'].mean()*100
 axes[0,2].bar(service_churn.index, service_churn.values,
                color='steelblue')
@@ -108,7 +101,6 @@ axes[0,2].set_title('Churn by Service Count')
 axes[0,2].set_xlabel('Services')
 
 
-#autopay
 
 pay_churn = df.groupby('Isautopay')['Churn_Binary'].mean()*100
 axes[1,0].bar(['Manual Pay','Auto Pay'],
@@ -121,7 +113,6 @@ for i, v in enumerate(pay_churn.values):
 
 
 
-#high value
 hv_churn = df.groupby('Ishighvalue')['Churn_Binary'].mean()*100
 axes[1,1].bar(['Low Value','High Value'],
                hv_churn.values,
@@ -133,7 +124,6 @@ for i, v in enumerate(hv_churn.values):
 
 
 
-#charges per tenure
 df[df['Churn_Binary']==0]['ChargesPerTenure'].hist(
     ax=axes[1,2], bins=30, alpha=0.6,
     color='green', label='Stayed')
@@ -190,7 +180,7 @@ y = df_ml[target]
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.2,
     random_state=42,
-    stratify=y)  # stratify keeps churn ratio same!
+    stratify=y)
 
 print(f"\nTraining samples : {X_train.shape[0]}")
 print(f"Testing samples  : {X_test.shape[0]}")
@@ -207,7 +197,6 @@ X_train_scaled = scaler.fit_transform(X_train)
 X_test_scaled = scaler.transform(X_test)
 
 
-#mdoel 1 logistic regression 
 print("training loigtstic regresssion")
 lr= LogisticRegression(max_iter = 1000, random_state=42)
 lr.fit(X_train_scaled, y_train)
@@ -215,7 +204,6 @@ lr_pred = lr.predict(X_test_scaled)
 lr_proba = lr.predict_proba(X_test_scaled)[:,1]
 
 
-#model 2 random forestation 
 
 print("ranndom foreststation")
 
@@ -229,7 +217,6 @@ rf.fit(X_train, y_train)
 rf_pred = rf.predict(X_test)
 rf_proba = rf.predict_proba(X_test)[:,1]
 
-#model 3 xgboost
 
 print("training XGboost")
 xgb = XGBClassifier(
@@ -290,7 +277,6 @@ print(f"False Negatives (Missed churners!)   : {fn}")
 print(f"True Positives  (Caught churners!)   : {tp}")
 
 
-# bussiness costs
 cost_fn = 500
 cost_fp =  50
 total_cost = (fn* cost_fn)+ (fp* cost_fp)
@@ -305,7 +291,6 @@ print(f"Cost of false alarms : ${fp*cost_fp:,}")
 print(f"Total cost           : ${total_cost:,}")
 print(f"Est. revenue saved   : ${cost_saved:,.0f}")
 
-# cross validation 
 print( " 5 fold cross validation")
 
 cv_scores = cross_val_score(
@@ -315,11 +300,9 @@ print(f"CV AUC Scores : {cv_scores.round(4)}")
 print(f"Mean AUC      : {cv_scores.mean():.4f}")
 print(f"Std Dev       : {cv_scores.std():.4f}")
 
-#visaulization
 fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 fig.suptitle('AnchorIQ — Model Evaluation', fontsize=16)
 
-#heatmap of confusion matrix
 sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
             xticklabels=['Stayed','Churned'],
             yticklabels=['Stayed','Churned'],
@@ -329,7 +312,6 @@ axes[0].set_ylabel('Actual')
 axes[0].set_xlabel('Predicted')
 
 
-# roc curve of all three models
 for name, (pred, proba), color in zip(
     ['Logistic Reg','Random Forest','XGBoost'],
     [(lr_pred, lr_proba),(rf_pred, rf_proba),(xgb_pred, xgb_proba)],
@@ -345,7 +327,6 @@ axes[1].set_ylabel('True Positive Rate')
 axes[1].legend()
 
 
-#cv score
 axes[2].bar(range(1,6), cv_scores,
             color='steelblue', edgecolor='white')
 axes[2].axhline(cv_scores.mean(), color='red',
@@ -362,7 +343,6 @@ plt.savefig('model_evaluation.png', dpi=150, bbox_inches='tight')
 plt.show()
 print("✅ Evaluation charts saved!")
 
-#thresold tuning
 print("thresold tuning for busineess")
 
 thresholds = np.arange(0.1, 0.9, 0.05)
@@ -398,7 +378,6 @@ thresh_df = pd.DataFrame (results_thresh)
 
 print(thresh_df[['Threshold','Recall','Precision','F1','Cost','Saved']].to_string(index=False))
 
-# best threshold by minimum cost
 
 best_idx = thresh_df['Cost'].idxmin()
 best_thresh = thresh_df.loc[best_idx, 'Threshold']
@@ -412,11 +391,9 @@ print(f"   Minimum Cost     : ${best_cost:,}")
 print(f"   Revenue Saved    : ${best_saved:,}")
 
 
-#visualization
 
 fig, axes = plt.subplots(1,2, figsize=(14,5))
 
-#cost curve
 
 axes[0].plot(thresh_df['Threshold'],
              thresh_df['Cost'],
@@ -430,7 +407,6 @@ axes[0].set_ylabel('Total Cost ($)')
 axes[0].legend()
 
 
-#recall vs preccision
 axes[1].plot(thresh_df['Threshold'],
              thresh_df['Recall'],
              'b-o', label='Recall')
@@ -472,7 +448,6 @@ size = os.path.getsize('models/churn_model.pkl')/1024
 print(f"MOdel saved size : {size:.2f} KB")
 
 
-#load and verify
 loaded= joblib.load('models/churn_model.pkl')
 model_loaded = loaded['model']
 scaler_loaded = loaded['scaler']
@@ -484,9 +459,7 @@ print(f"   Threshold : {threshold_loaded}")
 print(f"   AUC       : {loaded['auc']:.4f}")
 print(f"   Features  : {len(features_loaded)}")
 
-#predict new customer
 
-#simulate f5 customer comming inn 
 new_customers = pd.DataFrame({
     'tenure'          : [2,  45,  1, 60,  8],
     'MonthlyCharges'  : [85, 45, 95, 35, 78],
@@ -503,7 +476,6 @@ new_customers = pd.DataFrame({
 new_customers = new_customers.reindex(columns= features_loaded, fill_value=0)
 
 
-#sales and predict
 new_scaled = scaler_loaded.transform(new_customers)
 new_scaled = scaler_loaded.transform(new_customers)
 probabilities = model_loaded.predict_proba(new_scaled)[:,1]
@@ -523,7 +495,6 @@ pred_df = pd.DataFrame({
 
 print(pred_df.to_string(index=False))
 
-#save preddcition
 pred_df.to_csv('reports/predictions.csv', index=False)
 print("\n✅ Predictions saved!")
 print("\n🏆 churn_model.py COMPLETE!")

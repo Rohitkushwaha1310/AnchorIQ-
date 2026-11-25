@@ -59,15 +59,12 @@ except Exception:
 
 warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 
-# Configurable model list: disable any model simply by removing or commenting out its line.
 ENABLED_MODELS = [
-    # Fast / Stage 1
     "Logistic Regression",
     "Ridge",
     "ElasticNet",
     "Lasso",
     "Decision Tree",
-    # Heavier / Stage 2
     "Random Forest",
     "Extra Trees",
     "HistGradientBoosting",
@@ -127,7 +124,6 @@ def _detect_leakage(X: pd.DataFrame, y: pd.Series, is_classification: bool) -> l
         valid = feature.notna()
         if int(valid.sum()) < 10:
             continue
-        # Catch exact copies and inverted/encoded copies regardless of feature dtype.
         try:
             left = feature.loc[valid].astype(str).to_numpy()
             right = pd.Series(y, index=X.index).loc[valid].astype(str).to_numpy()
@@ -192,10 +188,11 @@ def _minority_average_precision(estimator, X, y, positive_label) -> float:
 
 
 def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
-               save_dir: str = "models", session_id: str = "default") -> dict:
+               save_dir: str | None = "models", session_id: str = "default") -> dict:
     """Compare and persist models while retaining the legacy response contract."""
     started = time.monotonic()
-    os.makedirs(save_dir, exist_ok=True)
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
     try:
         budget = max(1.0, float(os.getenv("MODEL_TIME_BUDGET", "60").strip()))
     except (TypeError, ValueError):
@@ -269,7 +266,6 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
         baseline_estimator = DummyRegressor(strategy="mean")
 
     preprocessor = _build_preprocessor(numeric_cols, categorical_cols)
-    # Stage 1: baseline and inexpensive models; all CV is five-fold when class counts permit.
     cv_results = {}
     candidates = []
     notes = []
@@ -424,7 +420,6 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
             notes.append(f"{name} skipped to preserve time for final fitting and artifact saving.")
             continue
         evaluate(name, estimator)
-    # Stage 2 only starts when a useful reserve remains; errors never abort other trials.
     if remaining() > max(34.0, budget * 0.58):
         for name, estimator in heavy:
             if remaining() <= max(27.0, budget * 0.46):
@@ -442,16 +437,16 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
         best_score = baseline_mean
         best_name, best_pipe = "Baseline", baseline_pipe
 
-    # Top-3 Ensemble (Soft-voting for classification, averaging for regression)
     ensemble_kept = False
     ensemble_details = "Ensemble not evaluated."
+    enable_ensemble = os.getenv("ENABLE_ENSEMBLE", "true").strip().lower() not in ("false", "0", "no")
     valid_singles = [
         (n, m, p) for n, (p, m) in fitted_candidates.items()
         if n != "Baseline" and np.isfinite(m)
     ]
     valid_singles.sort(key=lambda item: item[1], reverse=True)
 
-    if len(valid_singles) >= 3 and remaining() > max(3.0, budget * 0.05):
+    if enable_ensemble and len(valid_singles) >= 3 and remaining() > max(3.0, budget * 0.05):
         top_3 = valid_singles[:3]
         top_3_names = [item[0] for item in top_3]
         try:
@@ -504,13 +499,14 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
             cv_results["Ensemble"] = {"error": str(exc)}
             ensemble_details = f"Ensemble creation/evaluation encountered error: {exc}"
             notes.append(ensemble_details)
+    elif not enable_ensemble:
+        ensemble_details = "Ensemble omitted: disabled via configuration."
     elif len(valid_singles) < 3:
         ensemble_details = f"Ensemble omitted: fewer than 3 single models were successfully evaluated ({len(valid_singles)})."
     else:
         cv_results["Ensemble"] = {"skipped": "time budget reserve reached"}
         ensemble_details = "Ensemble omitted: insufficient time remaining in budget."
 
-    # Fit the chosen complete pipeline on all available data, then calibrate if time allows.
     brier = None
     calibrated_pipe = best_pipe
     try:
@@ -540,14 +536,12 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
             else:
                 notes.append("Calibration skipped because the remaining time or class count was insufficient.")
     except Exception as exc:
-        # A failed selected estimator must not hide a valid fallback.
         notes.append(f"Winner refit failed ({exc}); fitting the baseline instead.")
         best_name = "Baseline"
         best_pipe = Pipeline([("preprocessor", clone(preprocessor)), ("model", clone(baseline_estimator))]).fit(X, y)
         calibrated_pipe = best_pipe
         best_score = baseline_mean
 
-    # Holdout reporting retains existing response fields; CV remains the selection criterion.
     stratify = y if is_classification and int(y.value_counts().min()) >= 2 else None
     try:
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=stratify)
@@ -602,7 +596,6 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
         why_won = (f"Highest cross-validated {metric} ({best_score:.4f}); improvement over baseline is {margin:+.4f}."
                    if best_name != "Baseline" else "No non-baseline candidate produced a better valid cross-validation score.")
 
-    # Shallow Decision Tree rules limited to 15 lines
     decision_rules = None
     if "Decision Tree" in fitted_candidates:
         try:

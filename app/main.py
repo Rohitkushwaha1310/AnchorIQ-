@@ -29,17 +29,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict
 
-# Ensure Matplotlib stores cache files in system temp instead of project root
 os.environ.setdefault("MPLCONFIGDIR", os.path.join(tempfile.gettempdir(), "anchoriq_mplconfig"))
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Load local environment variables
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 1. Environment Configuration & Fail-Fast Startup Validation
-# ──────────────────────────────────────────────────────────────────────────────
 
 REQUIRED_BACKEND_ENV_VARS = [
     "SUPABASE_DB_URL",
@@ -108,7 +103,6 @@ app = FastAPI(
     description="AnchorIQ — Autonomous Business Intelligence Platform",
 )
 
-# Configure CORS origins from environment variable
 cors_env = os.getenv("CORS_ORIGINS", "http://localhost:8501").strip()
 cors_origins = [orig.strip() for orig in cors_env.split(",") if orig.strip()]
 if not cors_origins:
@@ -122,14 +116,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize database tables on startup
 initialize_database()
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 2. Authentication & Per-User Isolation
-# ──────────────────────────────────────────────────────────────────────────────
 
-# In-memory cache for validated Supabase JWT tokens: {token: (user_id_str, expire_timestamp)}
 _AUTH_TOKEN_CACHE: Dict[str, tuple[str, float]] = {}
 
 
@@ -201,9 +190,6 @@ def get_user_run_or_404(run_id: Any, user_id: str) -> dict:
     return run
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 3. Request Payloads & Helpers
-# ──────────────────────────────────────────────────────────────────────────────
 
 ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".json"}
 
@@ -294,9 +280,6 @@ def _build_fact_card(title: str, df: pd.DataFrame, target: Optional[str] = None)
     return build_fact_card(title, numbers=numbers, finding=finding)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 4. Public Endpoints
-# ──────────────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 def health():
@@ -312,9 +295,6 @@ def health():
     }
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 5. Authenticated Endpoints
-# ──────────────────────────────────────────────────────────────────────────────
 
 @app.post("/analyze")
 async def analyze(
@@ -334,11 +314,10 @@ async def analyze(
         session_id = uuid.uuid4().hex[:8]
         target_col_arg = target_column.strip() if target_column and target_column.strip() else None
 
-        # 1. Inspection
+        t_stage = time.perf_counter()
         inspection = inspect_dataset(df, analysis_type=analysis_type, target_column=target_col_arg)
         detected_target = inspection.get("target_column")
 
-        # Business Relevance Gate
         relevance = check_business_relevance(df)
         notice = None
         if relevance["verdict"] == "not_business":
@@ -358,54 +337,102 @@ async def analyze(
                 "Dataset has limited business indicators. Analysis will proceed, "
                 "but recommendations and models may be less specific."
             )
+        print(f"[analyze] inspection: {time.perf_counter() - t_stage:.2f}s")
 
-        # 2. Cleaning
+        t_stage = time.perf_counter()
         cleaned_df, cleaning_report = auto_clean(df.copy())
+        print(f"[analyze] cleaning: {time.perf_counter() - t_stage:.2f}s")
 
-        # 3. ML Modeling (in-memory bundle)
+        t_stage = time.perf_counter()
         model_results = {}
-        shap_card = None
-        shap_chart_bytes = None
-        shap_res = {"applicable": False, "reason": "No model trained."}
+        sample_warning = None
+
+        analysis_max_rows_val = os.getenv("ANALYSIS_MAX_ROWS", "3000").strip()
+        try:
+            analysis_max_rows = int(analysis_max_rows_val)
+        except (ValueError, TypeError):
+            analysis_max_rows = 3000
+
+        model_df = cleaned_df
+        if len(cleaned_df) > analysis_max_rows:
+            try:
+                if detected_target and detected_target in cleaned_df.columns:
+                    target_series = cleaned_df[detected_target]
+                    val_counts = target_series.value_counts()
+                    if len(val_counts) >= 2 and val_counts.min() >= 2:
+                        from sklearn.model_selection import train_test_split
+                        model_df, _ = train_test_split(
+                            cleaned_df,
+                            train_size=analysis_max_rows,
+                            stratify=target_series,
+                            random_state=42,
+                        )
+                    else:
+                        model_df = cleaned_df.sample(n=analysis_max_rows, random_state=42)
+                else:
+                    model_df = cleaned_df.sample(n=analysis_max_rows, random_state=42)
+            except Exception:
+                model_df = cleaned_df.sample(n=analysis_max_rows, random_state=42)
+            sample_warning = f"Models trained on a sample of {len(model_df)} rows"
 
         if detected_target and detected_target in cleaned_df.columns:
             try:
-                # auto_model runs in-memory and returns bundle_bytes
                 model_results = auto_model(
-                    cleaned_df,
+                    model_df,
                     target=detected_target,
                     analysis_type=analysis_type,
                     session_id=session_id,
+                    save_dir=None,
                 )
-                if model_results.get("best_model") and model_results.get("best_model") != "Baseline":
-                    try:
-                        # Use raw_pipeline for SHAP explanations to avoid feature shape mismatch
-                        raw_pipe = (model_results.get("bundle") or {}).get("raw_pipeline")
-                        feature_cols = [c for c in cleaned_df.columns if c != detected_target]
-                        if raw_pipe is not None:
-                            shap_res = explain_winning_model(
-                                pipeline=raw_pipe,
-                                X=cleaned_df[feature_cols],
-                                session_id=session_id,
-                            )
-                            if shap_res.get("applicable"):
-                                shap_chart_bytes = shap_res.get("chart_bytes")
-                                shap_card = shap_res.get("fact_card")
-                    except Exception as se:
-                        shap_res = {"applicable": False, "reason": str(se)}
+                if sample_warning:
+                    mc = model_results.get("model_card")
+                    if isinstance(mc, dict):
+                        mc.setdefault("warnings", []).insert(0, sample_warning)
+                    if isinstance(model_results.get("leakage_warnings"), list):
+                        model_results["leakage_warnings"].insert(0, sample_warning)
+                    else:
+                        model_results["leakage_warnings"] = [sample_warning]
             except Exception as e:
                 model_results = {"error": str(e)}
         else:
             model_results = {"error": "No valid target column identified for predictive modeling."}
+        print(f"[analyze] model: {time.perf_counter() - t_stage:.2f}s")
 
-        # 4. EDA Charts (rendered directly to in-memory bytes)
+        t_stage = time.perf_counter()
+        shap_card = None
+        shap_chart_bytes = None
+        shap_res = {"applicable": False, "reason": "No model trained."}
+        enable_shap = os.getenv("ENABLE_SHAP", "true").strip().lower() not in ("false", "0", "no")
+
+        if enable_shap and model_results.get("best_model") and model_results.get("best_model") != "Baseline":
+            try:
+                raw_pipe = (model_results.get("bundle") or {}).get("raw_pipeline")
+                feature_cols = [c for c in model_df.columns if c != detected_target]
+                if raw_pipe is not None:
+                    shap_res = explain_winning_model(
+                        pipeline=raw_pipe,
+                        X=model_df[feature_cols],
+                        session_id=session_id,
+                    )
+                    if shap_res.get("applicable"):
+                        shap_chart_bytes = shap_res.get("chart_bytes")
+                        shap_card = shap_res.get("fact_card")
+            except Exception as se:
+                shap_res = {"applicable": False, "reason": str(se)}
+        elif not enable_shap:
+            shap_res = {"applicable": False, "reason": "SHAP disabled via configuration."}
+        print(f"[analyze] shap: {time.perf_counter() - t_stage:.2f}s")
+
+        t_stage = time.perf_counter()
         raw_charts = auto_eda(
             cleaned_df,
             target=detected_target,
             analysis_type=analysis_type,
-            save_dir=None,  # Returns in-memory bytes dicts
+            save_dir=None,
         )
+        print(f"[analyze] eda: {time.perf_counter() - t_stage:.2f}s")
 
+        t_stage = time.perf_counter()
         chart_records = []
         chart_urls = []
 
@@ -415,8 +442,8 @@ async def analyze(
             if b:
                 uploaded = upload_chart_png(b, session_id, title)
                 sec_url = uploaded.get("secure_url")
-                if sec_url:
-                    chart_urls.append(sec_url)
+                chart_ref = sec_url or f"charts/{session_id}/{title.replace(' ', '_').lower()}.png"
+                chart_urls.append(chart_ref)
                 chart_records.append({
                     "title": title,
                     "cloudinary_url": sec_url,
@@ -424,12 +451,11 @@ async def analyze(
                     "fact_card": _build_fact_card(title, cleaned_df, target=detected_target),
                 })
 
-        # Embed SHAP summary chart if available
         if shap_chart_bytes:
             uploaded_shap = upload_chart_png(shap_chart_bytes, session_id, "SHAP Global Drivers")
             shap_sec_url = uploaded_shap.get("secure_url")
-            if shap_sec_url:
-                chart_urls.append(shap_sec_url)
+            shap_ref = shap_sec_url or f"charts/{session_id}/shap_global_drivers.png"
+            chart_urls.append(shap_ref)
             chart_records.append({
                 "title": "SHAP Global Drivers",
                 "cloudinary_url": shap_sec_url,
@@ -450,8 +476,9 @@ async def analyze(
                 "cloudinary_public_id": None,
                 "fact_card": top_card,
             })
+        print(f"[analyze] chart uploads: {time.perf_counter() - t_stage:.2f}s")
 
-        # 5. AI Insights
+        t_stage = time.perf_counter()
         insights = generate_insights(
             inspection=inspection,
             model_results=model_results,
@@ -459,18 +486,27 @@ async def analyze(
             analysis_type=analysis_type,
             feature_importance=model_results.get("feature_importance"),
         )
+        print(f"[analyze] insights: {time.perf_counter() - t_stage:.2f}s")
 
-        # 6. Upload model bundle & dataset directly from memory to Cloudinary private raw assets
+        t_stage = time.perf_counter()
         bundle_bytes = model_results.get("bundle_bytes")
         model_asset = {"uploaded": False}
         if bundle_bytes:
             model_asset = upload_private_file(bundle_bytes, session_id, f"model_{session_id}.pkl")
 
-        # Serialized cleaned dataset bytes
         csv_buf = io.BytesIO()
         cleaned_df.to_csv(csv_buf, index=False)
         csv_bytes = csv_buf.getvalue()
         dataset_asset = upload_private_file(csv_bytes, session_id, f"dataset_{session_id}.csv")
+        print(f"[analyze] asset uploads: {time.perf_counter() - t_stage:.2f}s")
+
+        warnings_list = []
+        if sample_warning:
+            warnings_list.append(sample_warning)
+        if isinstance(model_results.get("model_card", {}).get("warnings"), list):
+            for w in model_results["model_card"]["warnings"]:
+                if w not in warnings_list:
+                    warnings_list.append(w)
 
         model_card = {
             "session_id": session_id,
@@ -478,6 +514,7 @@ async def analyze(
             "model_asset": model_asset,
             "analysis_snapshot": make_analysis_snapshot(model_results, inspection, cleaning_report),
             "dataset_asset": dataset_asset,
+            "warnings": warnings_list,
             "dataset_summary": {
                 "rows": int(inspection.get("rows", len(cleaned_df))),
                 "target": detected_target or "not stored",
@@ -486,7 +523,6 @@ async def analyze(
             },
         }
 
-        # Save run record with logged-in user_id
         run_id = save_run_record(
             user_id=user_id,
             filename=file.filename or "dataset.csv",
@@ -498,7 +534,6 @@ async def analyze(
             chat_messages=[{"role": "assistant", "content": insights}],
         )
 
-        # Filter out non-serializable in-memory ML pipeline objects and binary bytes for the client response
         clean_model_results = (
             {k: v for k, v in model_results.items() if k not in ("bundle", "bundle_bytes")}
             if isinstance(model_results, dict)
@@ -560,7 +595,6 @@ def stream_run_report(run_id: int, user_id: Any = Depends(get_current_user)):
     uid = user_id if isinstance(user_id, str) else "00000000-0000-0000-0000-000000000001"
     run = get_user_run_or_404(run_id, uid)
 
-    # Download chart images into memory
     import requests
     chart_images = []
     for chart in run.get("charts", []):
@@ -573,12 +607,14 @@ def stream_run_report(run_id: int, user_id: Any = Depends(get_current_user)):
             except Exception:
                 pass
 
-    # Build PDF completely in memory
-    pdf_bytes = generate_pdf_report(
-        result=run,
-        output_path=None,  # in-memory return
-        chart_images=chart_images,
-    )
+    try:
+        pdf_bytes = generate_pdf_report(
+            result=run,
+            output_path=None,
+            chart_images=chart_images,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {exc}")
 
     return Response(
         content=pdf_bytes,
@@ -603,7 +639,6 @@ def get_predict_schema(run_id: str, user_id: Any = Depends(get_current_user)):
         if schema:
             return schema
 
-        # Fallback: load bundle from Cloudinary into memory
         model_asset = (run.get("model_card") or {}).get("model_asset") or {}
         if model_asset.get("public_id"):
             try:
@@ -614,7 +649,6 @@ def get_predict_schema(run_id: str, user_id: Any = Depends(get_current_user)):
             except Exception:
                 pass
 
-    # Under test, fallback to local test bundle if available
     if os.getenv("TESTING") or os.getenv("PYTEST_CURRENT_TEST"):
         from services.predictor import load_model_bundle
         try:
@@ -656,7 +690,6 @@ def predict_with_schema(run_id: str, payload: Dict[str, Any], user_id: Any = Dep
             except Exception as exc:
                 raise HTTPException(status_code=500, detail=f"Failed to load remote model: {exc}")
 
-    # Fallback under test
     if not bundle and (os.getenv("TESTING") or os.getenv("PYTEST_CURRENT_TEST")):
         from services.predictor import load_model_bundle
         try:
@@ -685,7 +718,6 @@ def predict_with_schema(run_id: str, payload: Dict[str, Any], user_id: Any = Dep
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
 
-    # Persist prediction row
     if run:
         try:
             pred_id = save_prediction_record(run_id=run["id"], inputs=inputs, output=result)

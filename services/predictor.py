@@ -10,7 +10,6 @@ import pandas as pd
 
 from services.explanations import explain_single_prediction
 
-# Named thresholds for risk labeling
 RISK_LOW_THRESHOLD = 0.35
 RISK_HIGH_THRESHOLD = 0.70
 
@@ -26,12 +25,10 @@ def validate_input_against_schema(input_data: Dict[str, Any], schema: Dict[str, 
     cols_schema = schema.get("columns") or schema.get("fields") or {}
     expected_fields = schema.get("column_names") or list(cols_schema.keys())
 
-    # 1. Missing fields check
     missing = [f for f in expected_fields if f not in input_data or input_data[f] is None or input_data[f] == ""]
     if missing:
         raise ValueError(f"Missing required field(s): {', '.join(missing)}")
 
-    # 2. Per-field validation
     for col in expected_fields:
         val = input_data[col]
         meta = cols_schema.get(col, {})
@@ -119,11 +116,9 @@ def predict_single(
     model_card = bundle.get("model_card") or {}
     feature_importance = model_card.get("feature_importance") or bundle.get("feature_importance") or {}
 
-    # Validate against schema if available
     if schema:
         validate_input_against_schema(input_data, schema)
 
-    # Construct single-row DataFrame with expected features
     if features:
         row_dict = {f: input_data.get(f, np.nan) for f in features}
     else:
@@ -148,13 +143,11 @@ def predict_single(
 
         conf_pct = f"{abs(prob if prob >= 0.5 else 1.0 - prob) * 100:.1f}%"
 
-        # Binary decision
         if prob >= threshold:
             pred_decision = classes[1] if classes and len(classes) > 1 else 1
         else:
             pred_decision = classes[0] if classes and len(classes) > 1 else 0
 
-        # Named constant threshold risk labeling
         if prob < RISK_LOW_THRESHOLD:
             risk_label = "Low"
         elif prob < RISK_HIGH_THRESHOLD:
@@ -162,7 +155,6 @@ def predict_single(
         else:
             risk_label = "High"
 
-        # Recommendation logic
         target_str = str(target).lower()
         if "churn" in target_str or "attrition" in target_str:
             if risk_label == "High":
@@ -177,7 +169,6 @@ def predict_single(
         final_pred = pred_decision
 
     else:
-        # Regression
         pred_val = float(pipeline.predict(df_input)[0])
         final_pred = round(pred_val, 2)
         prob = 1.0
@@ -185,7 +176,6 @@ def predict_single(
         risk_label = "Medium"
         recommendation = f"Estimated outcome for {target}: {final_pred:,.2f}."
 
-    # Top 3 explanations
     raw_pipe = bundle.get("raw_pipeline") or pipeline
     reasons, shap_status = explain_single_prediction(
         pipeline=raw_pipe,

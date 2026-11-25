@@ -65,7 +65,6 @@ def profile(df: pd.DataFrame, analysis_type: str = "auto", target_column: str | 
             else:
                 col_types[c] = "high_cardinality"
 
-    # ── target detection ──────────────────────────────────────────────────
     target, confidence, reason = None, 0.0, "no clear outcome column"
     if target_column and target_column in df.columns:
         target, confidence, reason = target_column, 1.0, "chosen by user"
@@ -79,7 +78,6 @@ def profile(df: pd.DataFrame, analysis_type: str = "auto", target_column: str | 
         if problem_type == "classification":
             positive_label = _positive_label(df[target])
 
-    # ── time axis / metric for trend analysis ─────────────────────────────
     dt_cols = [c for c, t in col_types.items() if t == "datetime"]
     time_col = dt_cols[0] if dt_cols else None
     metric = None
@@ -148,7 +146,6 @@ def find_leakage(df: pd.DataFrame, target: str, col_types: dict, problem_type: s
     return leaks
 
 
-# ── helpers ────────────────────────────────────────────────────────────────
 def _try_datetime(s: pd.Series):
     sample = s.dropna().astype(str).head(300)
     if sample.empty or sample.str.len().mean() < 6:
@@ -178,7 +175,7 @@ def _positive_label(s: pd.Series):
         if str(v).strip().lower() in POSITIVE_WORDS:
             return v
     counts = s.value_counts()
-    return counts.index[-1]  # minority class
+    return counts.index[-1]
 
 
 def _detect_target(df, col_types, analysis_type):

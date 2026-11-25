@@ -43,9 +43,9 @@ def nulls_and_duplicates_df():
     """A dataset containing duplicate rows, missing numerical values, and missing categorical values."""
     base_rows = [
         {"tenure": 12, "MonthlyCharges": 50.0, "Contract": "Month-to-month", "Churn": "No"},
-        {"tenure": 12, "MonthlyCharges": 50.0, "Contract": "Month-to-month", "Churn": "No"},  # Duplicate
-        {"tenure": np.nan, "MonthlyCharges": 75.0, "Contract": "One year", "Churn": "Yes"},   # Missing numeric
-        {"tenure": 24, "MonthlyCharges": np.nan, "Contract": None, "Churn": "No"},             # Missing numeric & category
+        {"tenure": 12, "MonthlyCharges": 50.0, "Contract": "Month-to-month", "Churn": "No"},
+        {"tenure": np.nan, "MonthlyCharges": 75.0, "Contract": "One year", "Churn": "Yes"},
+        {"tenure": 24, "MonthlyCharges": np.nan, "Contract": None, "Churn": "No"},
         {"tenure": 36, "MonthlyCharges": 85.0, "Contract": "Two year", "Churn": "No"},
     ] * 10
     return pd.DataFrame(base_rows)
@@ -72,7 +72,7 @@ def single_unique_target_df():
         "tenure": rng.randint(1, 48, size=n),
         "MonthlyCharges": np.round(rng.uniform(25.0, 95.0, size=n), 2),
         "Contract": rng.choice(["Month-to-month", "One year"], size=n),
-        "Churn": ["No"] * n,  # Only one unique class
+        "Churn": ["No"] * n,
     })
 
 

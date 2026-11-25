@@ -14,7 +14,6 @@ import streamlit as st
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Ensure .env is loaded whether running locally or via different working directories
 _env_path = Path(__file__).resolve().parent / ".env"
 if _env_path.exists():
     load_dotenv(dotenv_path=_env_path)
@@ -33,17 +32,18 @@ def _get_config(key: str, default: str = "") -> str:
     return str(val or default).strip()
 
 
-# Configuration from environment variables / secrets
 API_URL = _get_config("API_URL", "http://localhost:8000").rstrip("/")
 SUPABASE_URL = _get_config("SUPABASE_URL", "").rstrip("/")
 if SUPABASE_URL and not (SUPABASE_URL.startswith("http://") or SUPABASE_URL.startswith("https://")):
     SUPABASE_URL = f"https://{SUPABASE_URL}"
 SUPABASE_ANON_KEY = _get_config("SUPABASE_ANON_KEY", "")
+try:
+    ANALYZE_TIMEOUT = int(_get_config("ANALYZE_TIMEOUT", "900"))
+except (ValueError, TypeError):
+    ANALYZE_TIMEOUT = 900
 
-# Import lightweight inspection helper
 from services.inspection import inspect_dataset
 
-# Import unified styling system
 from ui.style import (
     ACCENT,
     ACCENT_SOFT,
@@ -92,14 +92,12 @@ def safe_button(*args, **kwargs):
     return _safe_streamlit_call(st.button, *args, **kwargs)
 
 
-# ── Page Configuration ────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="AnchorIQ — Autonomous Data Analysis",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ── Inject Minimalist Design System ───────────────────────────────────────────
 inject_custom_css()
 
 
@@ -126,9 +124,6 @@ def api_request(method: str, endpoint: str, **kwargs) -> requests.Response:
         )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# AUTHENTICATION SCREEN (Shown before anything else if not logged in)
-# ══════════════════════════════════════════════════════════════════════════════
 if "auth_token" not in st.session_state or not st.session_state["auth_token"]:
     st.markdown("<div style='height: 48px;'></div>", unsafe_allow_html=True)
     col_l, col_auth, col_r = st.columns([1, 1.4, 1])
@@ -211,7 +206,6 @@ if "auth_token" not in st.session_state or not st.session_state["auth_token"]:
     st.stop()
 
 
-# ── Analysis Categories ───────────────────────────────────────────────────────
 ANALYSIS_TYPES = {
     "auto": {"label": "Auto Intelligence", "desc": "Autonomous problem type and driver detection"},
     "churn": {"label": "Customer Churn", "desc": "Retention, attrition risk, and tenure drivers"},
@@ -222,9 +216,6 @@ ANALYSIS_TYPES = {
 }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SIDEBAR (Dark Editorial Palette)
-# ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
     render_sidebar_header("AnchorIQ", "Autonomous Analytics Platform")
 
@@ -252,18 +243,12 @@ with st.sidebar:
     st.caption("AnchorIQ Analytics Engine | Cloud Edition")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# HERO SECTION (Editorial Left-Aligned Header)
-# ══════════════════════════════════════════════════════════════════════════════
 render_header(
     title="AnchorIQ Autonomous Studio",
     subtitle="Import any dataset to generate exploratory data analysis, predictive machine learning benchmarks, and executive decision reports.",
 )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# UPLOAD & DATA CONFIGURATION
-# ══════════════════════════════════════════════════════════════════════════════
 col_upload, col_controls = st.columns([1.2, 1], gap="large")
 
 with col_upload:
@@ -317,7 +302,6 @@ with col_controls:
         unsafe_allow_html=True,
     )
 
-    # Dynamic target selector if data is loaded
     if df_preview is not None and not df_preview.empty:
         temp_insp = inspect_dataset(df_preview, analysis_type=analysis_type)
         auto_t = temp_insp.get("target_column")
@@ -332,9 +316,6 @@ with col_controls:
         )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# EXECUTION BUTTON & ENGINE DISPATCHER
-# ══════════════════════════════════════════════════════════════════════════════
 st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
 col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
 
@@ -350,14 +331,10 @@ with col_btn2:
         st.caption("<div style='text-align:center; color:#707670; margin-top: 4px;'>Upload a CSV, Excel, or JSON file to begin analysis</div>", unsafe_allow_html=True)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# PIPELINE EXECUTION (HYBRID ZERO-FAILURE)
-# ══════════════════════════════════════════════════════════════════════════════
 if uploaded and analyze_btn:
     progress_bar = st.progress(0, text="Initializing AnchorIQ engine...")
     session_id = str(uuid.uuid4())[:8]
 
-    # Pre-parse raw dataframe so it is cached for analysis and A/B testing
     try:
         uploaded.seek(0)
         fname = uploaded.name.lower()
@@ -374,7 +351,6 @@ if uploaded and analyze_btn:
     except Exception:
         df_raw = pd.DataFrame()
 
-    # Dispatch to FastAPI REST Backend via authenticated Bearer token
     result = None
     progress_bar.progress(20, text="Uploading dataset to analysis engine...")
 
@@ -390,7 +366,7 @@ if uploaded and analyze_btn:
             "/analyze",
             files={"file": (uploaded.name, uploaded.getvalue(), "application/octet-stream")},
             data=data_payload,
-            timeout=360,
+            timeout=ANALYZE_TIMEOUT,
         )
         if api_res.status_code == 200:
             result = api_res.json()
@@ -422,9 +398,6 @@ if uploaded and analyze_btn:
         st.error(f"Analysis failed: {result['error']}")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# RESULTS DASHBOARD
-# ══════════════════════════════════════════════════════════════════════════════
 if "result" in st.session_state:
     res = st.session_state["result"]
     analysis_type = st.session_state.get("analysis_type", "auto")
@@ -456,7 +429,6 @@ if "result" in st.session_state:
         unsafe_allow_html=True,
     )
 
-    # ── KPI Row ───────────────────────────────────────────────────────────────
     is_reg = ml.get("problem_type") == "regression"
     if is_reg:
         score_num = ml.get("r2_score") if ml.get("r2_score") is not None else ml.get("r2")
@@ -505,7 +477,6 @@ if "result" in st.session_state:
         unsafe_allow_html=True,
     )
 
-    # ── Reliability Verification Card ─────────────────────────────────────────
     mc = ml.get("model_card", {})
     if mc:
         verdict = mc.get("reliability_verdict", "moderate")
@@ -516,7 +487,6 @@ if "result" in st.session_state:
 
     st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
 
-    # ── 9 Minimalist Workspace Tabs ───────────────────────────────────────────
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
         "EDA Visualizations",
         "Model Benchmark",
@@ -529,9 +499,6 @@ if "result" in st.session_state:
         "Assistant Chat",
     ])
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # TAB 1: EDA VISUALIZATIONS
-    # ──────────────────────────────────────────────────────────────────────────
     with tab1:
         st.markdown("### Exploratory Data Visualizations")
         chart_labels = [
@@ -563,9 +530,6 @@ if "result" in st.session_state:
         else:
             st.info("No charts generated.")
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # TAB 2: MODEL BENCHMARK
-    # ──────────────────────────────────────────────────────────────────────────
     with tab2:
         st.markdown("### Predictive Machine Learning Benchmark")
 
@@ -665,9 +629,6 @@ if "result" in st.session_state:
         else:
             st.info("No suitable outcome variable was selected for predictive modeling.")
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # TAB 3: EXECUTIVE INSIGHTS
-    # ──────────────────────────────────────────────────────────────────────────
     with tab3:
         st.markdown("### Executive Insights & Strategy")
         insights = res.get("insights", "")
@@ -676,9 +637,6 @@ if "result" in st.session_state:
         else:
             st.info("Insights generation in progress...")
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # TAB 4: DATA QUALITY
-    # ──────────────────────────────────────────────────────────────────────────
     with tab4:
         st.markdown("### Data Cleaning & Integrity Audit")
 
@@ -712,9 +670,6 @@ if "result" in st.session_state:
             st.markdown("#### Missing Values Resolved by Column")
             safe_dataframe(pd.DataFrame(list(missing_cols.items()), columns=["Column", "Imputed Count"]), use_container_width=True)
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # TAB 5: FEATURE PROFILE
-    # ──────────────────────────────────────────────────────────────────────────
     with tab5:
         st.markdown("### Statistical Feature Profile")
         stats = insp.get("stats", {})
@@ -733,9 +688,6 @@ if "result" in st.session_state:
             cats = insp.get("categorical_cols", [])
             st.write(cats if cats else "None detected")
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # TAB 6: PDF REPORT
-    # ──────────────────────────────────────────────────────────────────────────
     with tab6:
         st.markdown("### Export Executive PDF Report")
         st.markdown("""
@@ -787,9 +739,6 @@ if "result" in st.session_state:
             k_col.markdown(f"**{k}**")
             v_col.markdown(str(v))
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # TAB 7: A/B TESTING
-    # ──────────────────────────────────────────────────────────────────────────
     with tab7:
         st.markdown("### Statistical A/B Testing")
         st.markdown("Evaluate statistically significant differences across customer segments or experiment groups.")
@@ -886,9 +835,6 @@ if "result" in st.session_state:
                         for n in ab_result["notes"]:
                             st.caption(f"{n}")
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # TAB 8: PREDICTION FORM
-    # ──────────────────────────────────────────────────────────────────────────
     with tab8:
         st.markdown("### Interactive Model Predictor")
         st.markdown("Enter values for features below to produce real-time model inferences and decision drivers.")
@@ -990,9 +936,6 @@ if "result" in st.session_state:
                         if pred_res.get("shap_status"):
                             st.caption(f"Explanation Engine: {pred_res.get('shap_status')}")
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # TAB 9: ASSISTANT CHAT
-    # ──────────────────────────────────────────────────────────────────────────
     with tab9:
         st.markdown("### Assistant Chat")
         st.caption("Answers use stored evidence from this analysis. Probability inquiries require customer feature inputs.")
@@ -1051,7 +994,6 @@ if "result" in st.session_state:
                     st.session_state[chat_key].append({"role": "assistant", "content": answer})
                     st.rerun()
 
-# ── Empty State ───────────────────────────────────────────────────────────────
 elif not uploaded:
     render_empty_state(
         title="No dataset imported",

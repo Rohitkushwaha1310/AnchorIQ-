@@ -10,7 +10,6 @@ def check(name, cond):
     print(("PASS " if cond else "FAIL ") + name)
     if not cond: sys.exit(1)
 
-# 1) data WITH an outcome column
 if os.path.exists("telco_churn.csv"):
     df, meta = load_any("telco_churn.csv", open("telco_churn.csv", "rb").read())
     r = run_analysis(df, "telco_churn.csv", "churn", base_dir="tests/_out")
@@ -19,7 +18,6 @@ if os.path.exists("telco_churn.csv"):
     check("per-row predictions saved", os.path.exists(r["enriched_file"]))
     check("recommendations produced", len(r["recommendations"]) >= 3)
 
-# 2) data WITHOUT an outcome column, with dates
 rng = np.random.RandomState(1); n = 400
 d = pd.DataFrame({"date": pd.date_range("2025-01-01", periods=n), "region": rng.choice(list("NSEW"), n),
                   "units": rng.poisson(20, n), "revenue": rng.gamma(5, 40, n)})

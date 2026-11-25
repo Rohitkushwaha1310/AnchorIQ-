@@ -1,19 +1,15 @@
-# Secrets
 .env
 
-# Python cache
 __pycache__/
 *.py[cod]
 *.pyc
 *$py.class
 .ipynb_checkpoints/
 
-# Virtual environments
 venv/
 .venv/
 env/
 
-# Generated runtime data, charts, models, and reports
 uploads/
 charts/
 reports/
@@ -21,11 +17,9 @@ models/
 *.pkl
 *.joblib
 
-# Generated root images
 /*.png
 *.png
 
-# Testing & IDE artifacts
 .pytest_cache/
 .vscode/
 .idea/

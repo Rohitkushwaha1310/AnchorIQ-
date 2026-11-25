@@ -8,20 +8,12 @@ df= pd.read_csv("telco_churn.csv")
 
 
 
-# print("TELECONNECT INDIA — CHURN ANALYSIS")
 
 
 
-# print(f"\nShape          : {df.shape}")
 print(f"Columns: {df.columns.tolist()}")
-# print(f"\nData Types:\n{df.dtypes}")
-# print(f"\nMissing Values:\n{df.isnull().sum()}")
-# print(f"\nFirst 5 rows:\n{df.head()}")
 
 
-# print("CHURN DISTRIBUTION ")
-# print(df['Churn'].value_counts())
-# print(f"Churn Rate: {(df['Churn']=='Yes').mean()*100:.2f}%") 
 
 
 
@@ -38,13 +30,11 @@ print("numeric values")
 print(df[['tenure','MonthlyCharges',
           'TotalCharges']].describe())
 
-#churning by key features
 
 fig , axes = plt.subplots(2, 3 , figsize = ( 16, 10))
 fig.suptitle('Teleconnect india churn EDA', fontsize = 16, fontweight = 'bold')
 
 
-# chrun distribution
 
 churn_counts = df['Churn'].value_counts()
 axes[0,0].pie(churn_counts, labels = churn_counts.index,
@@ -56,7 +46,6 @@ axes[0,0].set_title('Overall churn rate')
 
 
 
-# churn by contact type
 contract_churn = df.groupby('Contract')['Churn_Binary'].mean()*100
 axes[0,1].bar(contract_churn.index,
                 contract_churn.values,
@@ -67,7 +56,6 @@ axes[0,1].set_ylabel('churn rate%')
 axes[0,1].tick_params(axis='x', rotation=15)
 
 
-# tensure distrubution yhcurn 
 
 df[df['Churn']=='No']['tenure'].hist(
     ax=axes[0,2], bins=30, alpha=0.6,
@@ -81,7 +69,6 @@ axes[0,2].set_title('Tenure Distribution by chrun')
 axes[0,2].set_xlabel('Tenure(months)')
 axes[0,2].legend()
 
-#monthly charges by churn
 df.boxplot(column='MonthlyCharges',
              by='Churn', ax=axes[1,0])
 
@@ -89,7 +76,6 @@ axes[1,0].set_title('Mothnly charges by churnn ')
 axes[1,0].set_xlabel('Churn')
 
 
-# churn by ineret sevices
 internet_churn = df.groupby(
     'InternetService')['Churn_Binary'].mean()*100
 
@@ -100,7 +86,6 @@ axes[1,1].bar(internet_churn.index,
 axes[1,1].set_title('Churn rate by internet service')
 axes[1,1].set_ylabel('Churnn rate %')
 
-# chur by paymenbt 
 payment_churn= df.groupby(
     'PaymentMethod')['Churn_Binary'].mean()*100
 axes[1,2].bar(payment_churn.index,
@@ -111,16 +96,7 @@ axes[1,2].set_title('Churn by payment mehtood')
 axes[1,2].set_xlabel('CHurn rate %')
 
 
-# plt.tight_layout()
-# plt.show()
 
-# print("\n=== KEY CHURN INSIGHTS ===")
-# print(f"Avg tenure (churned)    : {df[df['Churn']=='Yes']['tenure'].mean():.1f} months")
-# print(f"Avg tenure (stayed)     : {df[df['Churn']=='No']['tenure'].mean():.1f} months")
-# print(f"Avg charges (churned)   : ${df[df['Churn']=='Yes']['MonthlyCharges'].mean():.2f}")
-# print(f"Avg charges (stayed)    : ${df[df['Churn']=='No']['MonthlyCharges'].mean():.2f}")
-# print(f"\nChurn by contract:")
-# print(df.groupby('Contract')['Churn_Binary'].mean()*100)
 
 
 df_corr = df.copy()
@@ -137,7 +113,6 @@ print("correleation with churn")
 print(churn_corr.to_string())
 
 
-#visualization of correlation
 fig, axes = plt.subplots(1,2 , figsize=(14,6))
 
 top_corr = churn_corr.drop('Churn_Binary').head(10)
@@ -150,7 +125,6 @@ axes[0].set_title('top Feature correleated with churn')
 axes[0].set_xlabel('correlation')
 
 
-#heatmap fo features
 key_features = ['tenure', 'MonthlyCharges', 'TotalCharges', 'Churn_Binary', 'Contract', 'PaymentMethod']
 sns.heatmap(
     df_corr[key_features].corr(),
@@ -162,7 +136,6 @@ plt.tight_layout()
 plt.show()
 
 
-#statical test
 from scipy import stats
 
 churned = df[df['Churn']=='Yes']['tenure']

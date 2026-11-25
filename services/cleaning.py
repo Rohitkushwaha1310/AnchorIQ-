@@ -11,21 +11,17 @@ def auto_clean(df: pd.DataFrame) -> tuple:
         "steps_applied" : [],
     }
 
-    # Step 1: Drop exact duplicates
     before = len(df)
     df = df.drop_duplicates()
     removed = before - len(df)
     if removed > 0:
         report["steps_applied"].append(f"Removed {removed} duplicate rows")
 
-    # Step 2: Fix numeric columns stored as strings (excluding ID columns)
     for col in df.columns:
         c_lower = col.lower()
         is_id = any(c_lower.endswith(k) or c_lower == k for k in ["id", "uuid", "guid", "key"])
         if not is_id and not pd.api.types.is_numeric_dtype(df[col]):
-            # Check if majority of non-null values can convert to numeric
             s_nonnull = df[col].dropna()
-            # real date/time objects (e.g. from Excel) must NOT be turned into numbers
             if len(s_nonnull) > 0 and s_nonnull.map(
                     lambda v: isinstance(v, (pd.Timestamp, _dt.datetime, _dt.date))).all():
                 df[col] = pd.to_datetime(df[col], errors="coerce")
@@ -37,7 +33,6 @@ def auto_clean(df: pd.DataFrame) -> tuple:
                     df[col] = pd.to_numeric(df[col], errors="coerce")
                     report["steps_applied"].append(f"Converted '{col}' to numeric")
 
-    # Step 3: Strip whitespace from string columns safely
     for col in df.columns:
         if not pd.api.types.is_numeric_dtype(df[col]):
             try:
@@ -45,7 +40,6 @@ def auto_clean(df: pd.DataFrame) -> tuple:
             except Exception:
                 pass
 
-    # Step 4: Parse date/time columns if applicable
     for col in df.columns:
         c_lower = col.lower()
         if ("date" in c_lower or "time" in c_lower or "timestamp" in c_lower) and not pd.api.types.is_numeric_dtype(df[col]):
@@ -57,7 +51,6 @@ def auto_clean(df: pd.DataFrame) -> tuple:
             except Exception:
                 pass
 
-    # Step 5: Impute missing values
     for col in df.columns:
         null_count = int(df[col].isnull().sum())
         if null_count > 0:

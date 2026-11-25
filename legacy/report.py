@@ -12,7 +12,6 @@ import pandas as pd
 
 df= pd.read_csv('reports/churn_with_predictions.csv')
 
-#Calculate metrics
 total_customers = len(df)
 churned = df['Churn_Binary'].sum()
 churn_rate = df['Churn_Binary'].mean()*100
@@ -23,7 +22,6 @@ revenue_at_risk  = df[df['Churn_Prediction']==1]['MonthlyCharges'].sum()
 avg_tenure_churn = df[df['Churn_Binary']==1]['tenure'].mean()
 avg_tenure_stay  = df[df['Churn_Binary']==0]['tenure'].mean()
 
-#COLORS
 NAVY  = colors.HexColor('#1B3A6B')
 BLACK = colors.HexColor('#1a1a1a')
 GRAY  = colors.HexColor('#555555')
@@ -31,7 +29,6 @@ RED   = colors.HexColor('#e74c3c')
 GREEN = colors.HexColor('#2ecc71')
 
 
-#styles
 def style(name, **kw):
     return ParagraphStyle(name, **kw)
 
@@ -64,7 +61,6 @@ def bul(t):
     return Paragraph(f"• {t}", bullet_s)
 
 
-#build report
 doc = SimpleDocTemplate(
     'reports/AnchorIQ_Churn_Report.pdf',
     pagesize=A4,
@@ -74,7 +70,6 @@ doc = SimpleDocTemplate(
 
 story = []
 
-#title page 
 story.append(Spacer(1, 10*mm))
 story.append(Paragraph("AnchorIQ", title_s))
 story.append(Paragraph(
@@ -88,7 +83,6 @@ story.append(Paragraph(
 story.append(Spacer(1, 5*mm))
 story.append(hr())
 
-#executive summary 
 story += sec("1. EXECUTIVE SUMMARY")
 story.append(Paragraph(
     f"TeleConnect India is experiencing a critical churn rate of "
@@ -100,7 +94,6 @@ story.append(Paragraph(
     body_s))
 
 
-#key matrics table 
 metrics_data = [
     ['Metric', 'Value', 'Status'],
     ['Total Customers', f'{total_customers:,}', '—'],
@@ -130,7 +123,6 @@ table.setStyle(TableStyle([
 story.append(table)
 story.append(Spacer(1, 5*mm))
 
-# ---- KEY FINDINGS ----
 story += sec("3. KEY FINDINGS")
 story.append(bul(
     f"<b>Month-to-month contracts</b> have the highest churn rate "
@@ -150,7 +142,6 @@ story.append(bul(
     f"<b>Low service adoption</b> (ServiceCount = 0-1) leads to "
     f"higher churn — customers with more services stay longer."))
 
-# ---- ML MODEL RESULTS ----
 story += sec("4. ML MODEL PERFORMANCE")
 story.append(Paragraph(
     "A Logistic Regression model was trained on 5,634 customer records "
@@ -182,7 +173,6 @@ model_table.setStyle(TableStyle([
 story.append(model_table)
 story.append(Spacer(1, 5*mm))
 
-# ---- RECOMMENDATIONS ----
 story += sec("5. BUSINESS RECOMMENDATIONS")
 recs = [
     ("Convert Month-to-Month Customers",
@@ -206,7 +196,6 @@ for title, desc in recs:
         f"<b>{title}:</b> {desc}", bullet_s))
     story.append(Spacer(1, 1*mm))
 
-# ---- CONCLUSION ----
 story += sec("6. CONCLUSION")
 story.append(Paragraph(
     f"This analysis demonstrates that TeleConnect India's "

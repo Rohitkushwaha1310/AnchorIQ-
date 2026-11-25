@@ -29,14 +29,15 @@ def explain_winning_model(
     pipeline: Any,
     X: pd.DataFrame,
     session_id: str,
-    charts_dir: str = "charts"
+    charts_dir: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Generate SHAP summary for the winning model if applicable.
-    Uses TreeExplainer for tree models, sampled Explainer capped at 500 rows otherwise.
+    Uses TreeExplainer for tree models, sampled Explainer capped at 100 rows otherwise.
     If SHAP is not applicable or not installed, skips and states why.
     """
-    os.makedirs(charts_dir, exist_ok=True)
+    if charts_dir:
+        os.makedirs(charts_dir, exist_ok=True)
 
     if not HAS_SHAP:
         return {
@@ -51,7 +52,6 @@ def explain_winning_model(
         model = getattr(pipeline, "named_steps", {}).get("model", pipeline)
         preprocessor = getattr(pipeline, "named_steps", {}).get("preprocessor", None)
 
-        # Cap sample at 100 rows for non-tree models and ensembles to stay within time budget
         is_tree = is_tree_model(model)
         n_sample = min(500 if is_tree else 100, len(X))
         X_sample = X.iloc[:n_sample].copy()
@@ -75,10 +75,8 @@ def explain_winning_model(
         shap_vals = explainer(X_trans)
         vals = shap_vals.values if hasattr(shap_vals, "values") else np.asarray(shap_vals)
         if vals.ndim == 3:
-            # Multi-class or binary two outputs: take class 1 or max variance
             vals = vals[:, :, 1] if vals.shape[2] == 2 else vals[:, :, 0]
 
-        # Top 10 drivers by mean absolute SHAP value
         mean_abs = np.mean(np.abs(vals), axis=0)
         indices = np.argsort(mean_abs)[::-1][:10]
         top_drivers = [
@@ -86,7 +84,6 @@ def explain_winning_model(
             for i in indices
         ]
 
-        # Render summary chart directly to in-memory PNG buffer
         buf = io.BytesIO()
         plt.figure(figsize=(9, 6))
         shap.summary_plot(vals, X_trans, feature_names=feature_names, show=False, max_display=10)
@@ -161,7 +158,6 @@ def explain_single_prediction(
                     sv = sv.values
                 if sv.ndim > 1:
                     sv = sv[0]
-                # Rank top 3 by absolute SHAP impact
                 abs_indices = np.argsort(np.abs(sv))[::-1][:3]
                 reasons = []
                 for idx in abs_indices:
@@ -174,7 +170,6 @@ def explain_single_prediction(
         except Exception:
             pass
 
-    # Fallback when SHAP is not installed or not applicable
     why_skipped = (
         "SHAP not installed in environment; ranked by trained feature importance."
         if not HAS_SHAP
@@ -183,7 +178,6 @@ def explain_single_prediction(
 
     fi = top_feature_importance or {}
     if not fi:
-        # Check model coef or feature_importances
         raw_imp = getattr(model, "feature_importances_", None)
         if raw_imp is None and hasattr(model, "coef_"):
             raw_imp = np.abs(model.coef_[0] if model.coef_.ndim > 1 else model.coef_)
@@ -199,7 +193,6 @@ def explain_single_prediction(
             reasons.append(f"{feat} = {val} (key driver, importance weight {weight:.3f})")
         return reasons, why_skipped
 
-    # Generic fallback
     cols = list(input_df.columns)[:3]
     reasons = [f"{c} = {input_df[c].iloc[0]} (primary input feature)" for c in cols]
     return reasons, why_skipped

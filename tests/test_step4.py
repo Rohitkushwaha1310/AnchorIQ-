@@ -23,13 +23,9 @@ from services.modeling import auto_model
 from app.main import get_predict_schema, predict_with_schema, ab_test, ABTestPayload
 
 
-# ==============================================================================
-# 1. A/B Test on Synthetic Data (Known Diff vs No Diff & Superstore)
-# ==============================================================================
 def test_ab_test_synthetic_known_difference_and_no_difference():
     rng = np.random.RandomState(42)
 
-    # A. Continuous Metric with KNOWN DIFFERENCE -> Must be SIGNIFICANT
     n = 100
     df_diff = pd.DataFrame({
         "group": ["Control"] * n + ["Treatment"] * n,
@@ -47,7 +43,6 @@ def test_ab_test_synthetic_known_difference_and_no_difference():
     assert res_diff["group_sizes"]["Treatment"] == n
     assert "statistically significant" in res_diff["plain_english_verdict"].lower()
 
-    # B. Continuous Metric with NO DIFFERENCE -> Must NOT be SIGNIFICANT
     df_nodiff = pd.DataFrame({
         "group": ["Control"] * n + ["Treatment"] * n,
         "revenue": list(rng.normal(50.0, 5.0, n)) + list(rng.normal(50.0, 5.0, n))
@@ -58,18 +53,15 @@ def test_ab_test_synthetic_known_difference_and_no_difference():
     assert res_nodiff["p_value"] >= 0.05
     assert "no statistically significant" in res_nodiff["plain_english_verdict"].lower()
 
-    # C. Binary Metric (Chi-square / Z-test)
     df_binary = pd.DataFrame({
         "group": ["A"] * 100 + ["B"] * 100,
-        "converted": [0] * 90 + [1] * 10 + [0] * 65 + [1] * 35  # 10% vs 35% conversion
+        "converted": [0] * 90 + [1] * 10 + [0] * 65 + [1] * 35
     })
     res_binary = run_ab_test(df=df_binary, group_column="group", metric_column="converted")
     assert res_binary["significant"] is True
     assert res_binary["metric_type"] == "binary"
     assert res_binary["lift_pct"] > 0
 
-    # D. Superstore Discount Groups (Acceptance criteria)
-    # Compare 'Low Discount (0-10%)' vs 'High Discount (20%+)' on Profit
     n_store = 120
     superstore_ab = pd.DataFrame({
         "Discount_Group": ["Low Discount (0-10%)"] * n_store + ["High Discount (20%+)"] * n_store,
@@ -77,17 +69,13 @@ def test_ab_test_synthetic_known_difference_and_no_difference():
     })
     res_superstore = run_ab_test(df=superstore_ab, group_column="Discount_Group", metric_column="Profit")
     assert res_superstore["significant"] is True
-    assert abs(res_superstore["cohens_d"]) > 1.0  # Large negative effect (High discount reduces profit)
+    assert abs(res_superstore["cohens_d"]) > 1.0
     assert "statistically significant" in res_superstore["plain_english_verdict"].lower()
     assert len(res_superstore["notes"]) >= 1
     assert "observational data does not prove causation" in res_superstore["notes"][0].lower()
 
 
-# ==============================================================================
-# 2. Invalid Prediction Inputs are Rejected
-# ==============================================================================
 def test_invalid_prediction_inputs_rejected(tmp_path):
-    # Train a minimal model to establish a verified schema
     df_train = pd.DataFrame({
         "tenure": [6, 12, 24, 36, 48, 60, 72] * 6,
         "MonthlyCharges": [25.0, 45.0, 65.0, 85.0, 105.0, 50.0, 70.0] * 6,
@@ -99,65 +87,54 @@ def test_invalid_prediction_inputs_rejected(tmp_path):
     session_id = "test_val_run"
     auto_model(df_train, target="Churn", save_dir=models_dir, session_id=session_id)
 
-    # Verify schema endpoint
     schema = get_predict_schema(session_id)
     assert "columns" in schema
 
-    # A. Missing required fields
     with pytest.raises(HTTPException) as exc_missing:
-        predict_with_schema(session_id, {"tenure": 12, "MonthlyCharges": 50.0})  # Missing 'Contract'
+        predict_with_schema(session_id, {"tenure": 12, "MonthlyCharges": 50.0})
     assert exc_missing.value.status_code == 400
     assert "missing" in exc_missing.value.detail.lower()
 
-    # B. Unknown category
     with pytest.raises(HTTPException) as exc_cat:
         predict_with_schema(session_id, {
             "tenure": 12,
             "MonthlyCharges": 50.0,
-            "Contract": "Centennial Plan"  # Not in allowed categories
+            "Contract": "Centennial Plan"
         })
     assert exc_cat.value.status_code == 400
     assert "unknown category" in exc_cat.value.detail.lower()
 
-    # C. Out-of-range numerical value (exceeds max)
     with pytest.raises(HTTPException) as exc_max:
         predict_with_schema(session_id, {
-            "tenure": 500,  # Max tenure in train is 72
+            "tenure": 500,
             "MonthlyCharges": 50.0,
             "Contract": "Month-to-month"
         })
     assert exc_max.value.status_code == 400
     assert "out of range" in exc_max.value.detail.lower()
 
-    # D. Out-of-range numerical value (below min)
     with pytest.raises(HTTPException) as exc_min:
         predict_with_schema(session_id, {
             "tenure": 12,
-            "MonthlyCharges": -100.0,  # Below min
+            "MonthlyCharges": -100.0,
             "Contract": "Month-to-month"
         })
     assert exc_min.value.status_code == 400
     assert "out of range" in exc_min.value.detail.lower()
 
 
-# ==============================================================================
-# 3. Prediction Works for Telco and One Other Business Dataset
-# ==============================================================================
 def test_prediction_works_for_telco_and_other_dataset():
-    # ── Dataset 1: Telco Churn ───────────────────────────────────────────────
     telco_path = "telco_churn.csv"
     assert os.path.exists(telco_path), "telco_churn.csv must exist in workspace"
 
-    df_telco = pd.read_csv(telco_path).dropna().head(150)  # Use 150 rows for fast testing
+    df_telco = pd.read_csv(telco_path).dropna().head(150)
     telco_session = "test_telco_run"
     res_telco = auto_model(df_telco, target="Churn", save_dir="models", session_id=telco_session)
     assert "best_model" in res_telco
 
-    # Fetch schema
     telco_schema = get_predict_schema(telco_session)
     assert telco_schema is not None
 
-    # Construct a valid input from the first row of telco data
     feature_cols = [c for c in df_telco.columns if c != "Churn" and c in (telco_schema.get("columns") or telco_schema)]
     valid_telco_input = {col: df_telco.iloc[0][col] for col in feature_cols}
 
@@ -169,7 +146,6 @@ def test_prediction_works_for_telco_and_other_dataset():
     assert "reasons" in pred_telco
     assert 1 <= len(pred_telco["reasons"]) <= 3
 
-    # ── Dataset 2: Superstore Sales Business Dataset ──────────────────────────
     rng = np.random.RandomState(123)
     n_store = 150
     df_superstore = pd.DataFrame({
@@ -198,4 +174,8 @@ def test_prediction_works_for_telco_and_other_dataset():
     assert pred_store["risk_label"] in ["Low", "Medium", "High"]
     assert "reasons" in pred_store
     assert 1 <= len(pred_store["reasons"]) <= 3
+
+    import shutil
+    if os.path.exists("models"):
+        shutil.rmtree("models", ignore_errors=True)
 

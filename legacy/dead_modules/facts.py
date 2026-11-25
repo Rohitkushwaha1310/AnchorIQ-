@@ -75,7 +75,6 @@ def build_facts(df, info, model, scored, seg, anom, fc, analysis_type="general",
     return facts
 
 
-# ── supervised ────────────────────────────────────────────────────────────
 def _model_quality(model, F, W):
     if model["problem_type"] == "classification":
         if model.get("oof_recall") is not None:
@@ -104,7 +103,6 @@ def _supervised_classification(df, info, model, scored, dom, F, R):
         F.append({"kind": "base_rate", "importance": 0.9,
                   "text": f"Overall {target} = '{pos}' rate is {overall:.1%} ({int(y.sum()):,} of {n:,}).",
                   "evidence": {"rate": overall}})
-        # gains
         order = np.argsort(-scored["prediction_score"].values)
         k = max(1, int(n * 0.1))
         cap = y.values[order][:k].sum() / max(y.sum(), 1)
@@ -208,7 +206,6 @@ def _segment_findings(segs, target, pos, overall, dom, F, R, n, kind):
                   "impact": f"Closing even part of the gap to {fmt(overall)} compounds across the base.", "score": 0.3})
 
 
-# ── descriptive / time series ────────────────────────────────────────────
 def _forecast_facts(fc, F, R, W):
     f = fc["forecast"]["y"]
     last = fc["history"]["y"][-1]

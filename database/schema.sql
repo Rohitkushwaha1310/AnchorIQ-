@@ -1,5 +1,3 @@
--- Supabase / PostgreSQL schema for AnchorIQ
--- Paste into the Supabase SQL editor.
 
 CREATE TABLE IF NOT EXISTS runs (
     id SERIAL PRIMARY KEY,
@@ -50,9 +48,6 @@ CREATE INDEX IF NOT EXISTS idx_insights_run_id ON insights(run_id);
 CREATE INDEX IF NOT EXISTS idx_chat_run_id ON chat_messages(run_id);
 CREATE INDEX IF NOT EXISTS idx_predictions_run_id ON predictions(run_id);
 
--- =============================================================================
--- Idempotent Migration: Safe to run on an existing database
--- =============================================================================
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS user_id UUID;
 CREATE INDEX IF NOT EXISTS idx_runs_user_id ON runs(user_id);
 

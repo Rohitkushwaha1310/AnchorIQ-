@@ -44,6 +44,7 @@ def test_run_is_saved_with_charts_and_insights(monkeypatch):
     )
 
     client = TestClient(app_module.app)
+    client.headers.update({"Authorization": "Bearer 00000000-0000-0000-0000-000000000001"})
     response = client.post(
         "/analyze",
         files={"file": ("sample.csv", df_to_csv_bytes(df), "text/csv")},
@@ -76,6 +77,7 @@ def test_delete_removes_everything(monkeypatch):
     })
 
     client = TestClient(app_module.app)
+    client.headers.update({"Authorization": "Bearer 00000000-0000-0000-0000-000000000001"})
     response = client.post(
         "/analyze",
         files={"file": ("delete_test.csv", df_to_csv_bytes(df), "text/csv")},
@@ -97,6 +99,7 @@ def test_local_only_mode_works_without_keys(monkeypatch):
 
     assert db_module.get_database_url().startswith("sqlite")
     client = TestClient(app_module.app)
+    client.headers.update({"Authorization": "Bearer 00000000-0000-0000-0000-000000000001"})
 
     response = client.get("/health")
     assert response.status_code == 200

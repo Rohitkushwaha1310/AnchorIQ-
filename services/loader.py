@@ -14,7 +14,7 @@ import pandas as pd
 
 try:
     import chardet
-except Exception:  # optional
+except Exception:
     chardet = None
 
 SUPPORTED_EXTENSIONS = (
@@ -22,7 +22,7 @@ SUPPORTED_EXTENSIONS = (
     ".ndjson", ".parquet", ".xml", ".db", ".sqlite", ".sqlite3", ".pdf",
 )
 
-MAX_BYTES = 200 * 1024 * 1024  # 200 MB safety cap
+MAX_BYTES = 200 * 1024 * 1024
 
 
 def load_any(filename: str, content: bytes):
@@ -54,7 +54,7 @@ def load_any(filename: str, content: bytes):
             df = _read_xml(content, meta)
         elif ext in (".db", ".sqlite", ".sqlite3"):
             df = _read_sqlite(content, meta)
-        else:  # .pdf
+        else:
             df = _read_pdf_tables(content, meta)
     except ValueError:
         raise
@@ -65,7 +65,6 @@ def load_any(filename: str, content: bytes):
     return df, meta
 
 
-# ── readers ────────────────────────────────────────────────────────────────
 def _decode(content: bytes) -> str:
     enc = "utf-8"
     if chardet is not None:
@@ -113,7 +112,6 @@ def _read_excel(content: bytes, meta: dict) -> pd.DataFrame:
     meta["notes"].append(f"Excel: using sheet '{name}' ({len(sheets)} sheet(s) found)")
     if raw.empty or len(raw) < 2:
         raise ValueError(f"Sheet '{name}' contains insufficient tabular data.")
-    # header detection: first row where >=50% of the cells are filled
     header_idx = 0
     for i in range(min(len(raw), 30)):
         if raw.iloc[i].notna().mean() >= 0.5:
@@ -137,12 +135,10 @@ def _read_json(content: bytes, meta: dict) -> pd.DataFrame:
     if isinstance(obj, dict):
         if not obj:
             raise ValueError("The JSON object is empty.")
-        # dict of equal-length lists -> columns
         if all(isinstance(v, list) for v in obj.values()) and len(obj) > 0:
             lens = {len(v) for v in obj.values()}
             if len(lens) == 1:
                 return pd.DataFrame(obj)
-        # find the biggest list of records inside the object
         best, best_len = None, 0
         stack = [obj]
         while stack:
@@ -223,12 +219,10 @@ def _read_pdf_tables(content: bytes, meta: dict) -> pd.DataFrame:
     if not frames:
         raise ValueError("No tables could be found in this PDF.")
     meta["notes"].append(f"PDF: extracted {len(frames)} table(s)")
-    # merge tables that share the same header, otherwise use the largest
     same = [f for f in frames if list(f.columns) == list(frames[0].columns)]
     return pd.concat(same, ignore_index=True) if len(same) > 1 else max(frames, key=len)
 
 
-# ── tidy ───────────────────────────────────────────────────────────────────
 def _tidy(df: pd.DataFrame, meta: dict) -> pd.DataFrame:
     if df is None or df.empty:
         raise ValueError("The file contains no usable tabular data or rows.")
@@ -251,7 +245,7 @@ def _tidy(df: pd.DataFrame, meta: dict) -> pd.DataFrame:
         raise ValueError(f"The dataset must contain at least 2 columns for analysis (found {df.shape[1]}).")
     if df.shape[0] < 2:
         raise ValueError(f"The dataset must contain at least 2 rows of data (found {df.shape[0]}).")
-    for c in df.columns:  # python date/datetime objects -> proper datetime64
+    for c in df.columns:
         if df[c].dtype == object:
             nn = df[c].dropna()
             if len(nn) and nn.map(lambda v: hasattr(v, "year") and hasattr(v, "month")).all():

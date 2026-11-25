@@ -13,7 +13,6 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY, TA_RIGHT
 from reportlab.pdfgen import canvas
 
 
-# Brand Palette
 NAVY   = colors.HexColor("#1B3A6B")
 TEAL   = colors.HexColor("#0EA5E9")
 DARK   = colors.HexColor("#1E293B")
@@ -80,13 +79,62 @@ def generate_pdf_report(
     if not in_memory and os.path.dirname(output_path):
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    insp = result.get("inspection", {})
-    clean = result.get("cleaning", {})
-    ml = result.get("model_results", {})
-    insights_text = result.get("insights", "")
-    analysis_type = result.get("analysis_type", insp.get("analysis_type", "auto")).upper()
-    filename = result.get("filename", "Business Dataset")
+    insp = result.get("inspection") or {}
+    clean = result.get("cleaning") or {}
+    ml = result.get("model_results") or {}
+    card = result.get("model_card") or {}
+    snap = card.get("analysis_snapshot") or {}
+    summary = card.get("dataset_summary") or {}
+
+    raw_insights = result.get("insights", "")
+    if isinstance(raw_insights, list):
+        parts = []
+        for item in raw_insights:
+            if isinstance(item, dict):
+                t = item.get("text") or item.get("content") or ""
+                if t:
+                    parts.append(str(t).strip())
+            elif isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+        insights_text = "\n\n".join(parts)
+    elif isinstance(raw_insights, dict):
+        insights_text = str(raw_insights.get("text") or raw_insights.get("content") or "").strip()
+    elif isinstance(raw_insights, str):
+        insights_text = raw_insights.strip()
+    else:
+        insights_text = str(raw_insights or "")
+
+    analysis_type = result.get("analysis_type") or insp.get("analysis_type") or "AUTO"
+    analysis_type = str(analysis_type).upper()
+    filename = result.get("filename") or "Business Dataset"
     timestamp = datetime.now().strftime("%B %d, %Y - %H:%M")
+
+    target_val = (
+        insp.get("target_column")
+        or result.get("target")
+        or summary.get("target")
+        or "N/A"
+    )
+    best_algo = (
+        ml.get("best_model")
+        or snap.get("winner")
+        or summary.get("best_model")
+        or "Auto-Selected Model"
+    )
+    score_val = (
+        ml.get("auc")
+        or ml.get("r2")
+        or snap.get("winning_score")
+        or summary.get("score")
+        or "N/A"
+    )
+    acc_val = ml.get("accuracy") or snap.get("accuracy")
+    score_display = f"AUC/R²: {score_val}" + (f" | Accuracy: {acc_val}%" if acc_val is not None else "")
+
+    rows_cnt = insp.get("rows") or summary.get("rows") or 0
+    cols_cnt = insp.get("columns") or len(card.get("schema") or {}) or 0
+    nulls_cnt = insp.get("missing_total") or clean.get("nulls_remaining") or 0
+    dups_cnt = insp.get("duplicates") or 0
 
     doc = SimpleDocTemplate(
         target_dest,
@@ -109,9 +157,6 @@ def generate_pdf_report(
 
     story = []
 
-    # ════════════════════════════════════════════════════════════════════════
-    # PAGE 1 — COVER PAGE
-    # ════════════════════════════════════════════════════════════════════════
     story.append(Spacer(1, 25 * mm))
     story.append(Paragraph("⚓ AnchorIQ", title_style))
     story.append(Spacer(1, 2 * mm))
@@ -131,9 +176,9 @@ def generate_pdf_report(
     meta_info = [
         ["Dataset Name:", filename],
         ["Report Generated:", timestamp],
-        ["Target Variable:", str(insp.get("target_column") or "N/A")],
-        ["Best ML Algorithm:", str(ml.get("best_model") or "Auto-Selected Model")],
-        ["Validation Score:", f"AUC/R²: {ml.get('auc', ml.get('r2', 'N/A'))} | Accuracy: {ml.get('accuracy', 'N/A')}%"],
+        ["Target Variable:", str(target_val)],
+        ["Best ML Algorithm:", str(best_algo)],
+        ["Validation Score:", score_display],
     ]
     meta_table = Table(
         [[Paragraph(k, body_bold), Paragraph(v, body_style)] for k, v in meta_info],
@@ -147,13 +192,12 @@ def generate_pdf_report(
     story.append(meta_table)
     story.append(Spacer(1, 10 * mm))
 
-    # Executive KPI Summary Tiles
     kpi_data = [
         [
-            Paragraph(f"<font size='15'><b>{insp.get('rows', 0):,}</b></font><br/><font color='#64748B'>Rows</font>", _style("K1", alignment=TA_CENTER)),
-            Paragraph(f"<font size='15'><b>{insp.get('columns', 0)}</b></font><br/><font color='#64748B'>Columns</font>", _style("K2", alignment=TA_CENTER)),
-            Paragraph(f"<font size='15'><b>{insp.get('missing_total', 0)}</b></font><br/><font color='#64748B'>Fixed Nulls</font>", _style("K3", alignment=TA_CENTER)),
-            Paragraph(f"<font size='15'><b>{insp.get('duplicates', 0)}</b></font><br/><font color='#64748B'>Duplicates</font>", _style("K4", alignment=TA_CENTER)),
+            Paragraph(f"<font size='15'><b>{rows_cnt:,}</b></font><br/><font color='#64748B'>Rows</font>", _style("K1", alignment=TA_CENTER)),
+            Paragraph(f"<font size='15'><b>{cols_cnt}</b></font><br/><font color='#64748B'>Columns</font>", _style("K2", alignment=TA_CENTER)),
+            Paragraph(f"<font size='15'><b>{nulls_cnt}</b></font><br/><font color='#64748B'>Fixed Nulls</font>", _style("K3", alignment=TA_CENTER)),
+            Paragraph(f"<font size='15'><b>{dups_cnt}</b></font><br/><font color='#64748B'>Duplicates</font>", _style("K4", alignment=TA_CENTER)),
         ]
     ]
     kpi_t = Table(kpi_data, colWidths=["25%"]*4)
@@ -165,9 +209,6 @@ def generate_pdf_report(
     story.append(kpi_t)
     story.append(PageBreak())
 
-    # ════════════════════════════════════════════════════════════════════════
-    # PAGE 2 — DATASET OVERVIEW
-    # ════════════════════════════════════════════════════════════════════════
     story.append(Paragraph("Dataset Overview & Profile", section_style))
     story.append(HRFlowable(width="100%", thickness=1, color=TEAL, spaceAfter=3*mm))
 
@@ -195,7 +236,6 @@ def generate_pdf_report(
     story.append(ov_tbl)
     story.append(Spacer(1, 4 * mm))
 
-    # Top Numerical Stats Table
     stats = insp.get("stats", {})
     if stats:
         story.append(Paragraph("Numerical Attributes Distribution Summary", _style("SubSec", fontSize=11, fontName="Helvetica-Bold", textColor=NAVY, spaceAfter=2*mm)))
@@ -222,9 +262,6 @@ def generate_pdf_report(
 
     story.append(PageBreak())
 
-    # ════════════════════════════════════════════════════════════════════════
-    # PAGE 3 — CLEANING REPORT
-    # ════════════════════════════════════════════════════════════════════════
     story.append(Paragraph("Data Hygiene & Cleaning Report", section_style))
     story.append(HRFlowable(width="100%", thickness=1, color=TEAL, spaceAfter=3*mm))
 
@@ -263,14 +300,12 @@ def generate_pdf_report(
 
     story.append(PageBreak())
 
-    # ════════════════════════════════════════════════════════════════════════
-    # PAGES 4-5 — EDA CHARTS (2 charts per page)
-    # ════════════════════════════════════════════════════════════════════════
-    # Collect candidate chart image objects
-    all_charts = chart_images if chart_images is not None else (chart_paths or result.get("chart_paths", []))
+    all_charts = chart_images if chart_images is not None else (chart_paths or result.get("chart_paths") or result.get("charts") or [])
     valid_charts = []
     for item in all_charts:
         if isinstance(item, (bytes, io.BytesIO)):
+            if isinstance(item, io.BytesIO):
+                item.seek(0)
             valid_charts.append(item)
         elif isinstance(item, str):
             if os.path.exists(item):
@@ -279,6 +314,16 @@ def generate_pdf_report(
                 try:
                     import requests
                     r = requests.get(item, timeout=8)
+                    if r.status_code == 200:
+                        valid_charts.append(io.BytesIO(r.content))
+                except Exception:
+                    pass
+        elif isinstance(item, dict):
+            curl = item.get("cloudinary_url")
+            if curl and (curl.startswith("http://") or curl.startswith("https://")):
+                try:
+                    import requests
+                    r = requests.get(curl, timeout=8)
                     if r.status_code == 200:
                         valid_charts.append(io.BytesIO(r.content))
                 except Exception:
@@ -317,21 +362,36 @@ def generate_pdf_report(
 
     story.append(PageBreak())
 
-    # ════════════════════════════════════════════════════════════════════════
-    # PAGE 6 — ML RESULTS
-    # ════════════════════════════════════════════════════════════════════════
     story.append(Paragraph("Machine Learning Benchmarking & Performance", section_style))
     story.append(HRFlowable(width="100%", thickness=1, color=TEAL, spaceAfter=3*mm))
 
-    is_reg = ml.get("problem_type") == "regression"
+    is_reg = (result.get("problem_type") or ml.get("problem_type") or snap.get("metric")) == "regression"
     score_col_name = "R² Score" if is_reg else "ROC AUC"
-    best_name = ml.get("best_model", "Random Forest")
+    best_name = str(best_algo)
+
+    cv_scores = ml.get("cv_scores") or snap.get("cv_scores") or {}
+    lr_score = ml.get("lr_score", cv_scores.get("Logistic Regression", cv_scores.get("Ridge", 0.0)))
+    rf_score = ml.get("rf_score", cv_scores.get("Random Forest", 0.0))
+    xgb_score = ml.get("xgb_score", cv_scores.get("XGBoost", 0.0))
+
+    try:
+        lr_str = f"{float(lr_score):.4f}"
+    except (TypeError, ValueError):
+        lr_str = "0.0000"
+    try:
+        rf_str = f"{float(rf_score):.4f}"
+    except (TypeError, ValueError):
+        rf_str = "0.0000"
+    try:
+        xgb_str = f"{float(xgb_score):.4f}"
+    except (TypeError, ValueError):
+        xgb_str = "0.0000"
 
     m_rows = [
         ["Model Architecture", score_col_name, "Evaluation Status"],
-        ["Logistic Regression / Ridge", f"{ml.get('lr_score', 0):.4f}", "Baseline Linear"],
-        ["Random Forest (Ensemble)", f"{ml.get('rf_score', 0):.4f}", "Bagging Non-Linear"],
-        ["XGBoost (Gradient Boosted)", f"{ml.get('xgb_score', 0):.4f}", "Gradient Boosting"],
+        ["Logistic Regression / Ridge", lr_str, "Baseline Linear"],
+        ["Random Forest (Ensemble)", rf_str, "Bagging Non-Linear"],
+        ["XGBoost (Gradient Boosted)", xgb_str, "Gradient Boosting"],
     ]
 
     tbl_rows = []
@@ -347,7 +407,6 @@ def generate_pdf_report(
         ("PADDING", (0, 0), (-1, -1), 6),
     ]
 
-    # Highlight best model row green
     for idx_r, row in enumerate(m_rows[1:], 1):
         if best_name.lower() in row[0].lower() or (best_name.lower().startswith("xgb") and "xgboost" in row[0].lower()):
             t_styles.append(("BACKGROUND", (0, idx_r), (-1, idx_r), colors.HexColor("#D1FAE5")))
@@ -357,12 +416,23 @@ def generate_pdf_report(
     story.append(ml_tbl)
     story.append(Spacer(1, 5 * mm))
 
-    # Details
+    cv_mean_val = ml.get("cv_mean") or snap.get("winning_score") or 0.0
+    cv_std_val = ml.get("cv_std") or snap.get("cv_std") or 0.0
+    try:
+        cv_str = f"{float(cv_mean_val):.4f} (± {float(cv_std_val):.4f})"
+    except (TypeError, ValueError):
+        cv_str = "N/A"
+
+    train_s = ml.get("train_samples") or snap.get("train_samples") or 0
+    test_s = ml.get("test_samples") or snap.get("test_samples") or 0
+    active_dims = ml.get("n_features") or snap.get("n_features") or cols_cnt
+    thresh_val = ml.get("optimal_threshold") or snap.get("threshold", 0.5)
+
     details_data = [
-        ["Cross-Validation Mean (5-Fold)", f"{ml.get('cv_mean', 0):.4f} (± {ml.get('cv_std', 0):.4f})"],
-        ["Training / Test Sample Split", f"{ml.get('train_samples', 0):,} train / {ml.get('test_samples', 0):,} test"],
-        ["Engineered Feature Count", f"{ml.get('n_features', 0)} active dimensions"],
-        ["Optimal Decision Threshold", f"{ml.get('optimal_threshold', 0.5)} (Cost-optimized: FN=500, FP=50)" if not is_reg else "N/A (Continuous Regression)"],
+        ["Cross-Validation Mean (5-Fold)", cv_str],
+        ["Training / Test Sample Split", f"{train_s:,} train / {test_s:,} test"],
+        ["Engineered Feature Count", f"{active_dims} active dimensions"],
+        ["Optimal Decision Threshold", f"{thresh_val} (Cost-optimized: FN=500, FP=50)" if not is_reg else "N/A (Continuous Regression)"],
     ]
     det_tbl = Table([[Paragraph(k, table_cell_bold), Paragraph(v, table_cell)] for k, v in details_data], colWidths=["45%", "55%"])
     det_tbl.setStyle(TableStyle([
@@ -373,9 +443,8 @@ def generate_pdf_report(
     story.append(det_tbl)
     story.append(Spacer(1, 5 * mm))
 
-    # Confusion Matrix
-    cm = ml.get("confusion_matrix", [])
-    if cm and len(cm) == 2:
+    cm = ml.get("confusion_matrix") or snap.get("confusion_matrix")
+    if cm and len(cm) == 2 and len(cm[0]) == 2 and len(cm[1]) == 2:
         story.append(Paragraph("Holdout Evaluation Confusion Matrix:", _style("CMH", fontSize=10, fontName="Helvetica-Bold", textColor=NAVY, spaceAfter=2*mm)))
         cm_tbl_data = [
             ["", "Predicted Negative (0)", "Predicted Positive (1)"],
@@ -394,9 +463,6 @@ def generate_pdf_report(
 
     story.append(PageBreak())
 
-    # ════════════════════════════════════════════════════════════════════════
-    # PAGE 7 — AI INSIGHTS
-    # ════════════════════════════════════════════════════════════════════════
     story.append(Paragraph("Strategic Business Intelligence & Insights", section_style))
     story.append(HRFlowable(width="100%", thickness=1, color=TEAL, spaceAfter=4*mm))
 
@@ -416,16 +482,20 @@ def generate_pdf_report(
             elif line_str.startswith(("- ", "* ")):
                 bullet_text = line_str[2:].strip()
                 story.append(Paragraph(f"<font color='#0EA5E9'>&bull;</font> {bullet_text}", _style("AiBul", fontSize=9, fontName="Helvetica", textColor=DARK, leading=13, leftIndent=8)))
-            elif line_str[0].isdigit() and (line_str[1:3] in [". ", ") "]):
-                num_text = line_str[2:].strip() if line_str[1] in [".", ")"] else line_str[3:].strip()
-                num_idx = line_str.split()[0]
-                story.append(Paragraph(f"<b>{num_idx}</b> {num_text}", _style("AiNum", fontSize=9, fontName="Helvetica", textColor=DARK, leading=13, leftIndent=8)))
             else:
-                story.append(Paragraph(line_str, body_style))
+                is_num = False
+                parts = line_str.split(maxsplit=1)
+                if parts:
+                    fw = parts[0]
+                    if (fw.endswith(".") or fw.endswith(")")) and fw[:-1].isdigit():
+                        is_num = True
+                        n_text = parts[1] if len(parts) > 1 else ""
+                        story.append(Paragraph(f"<b>{fw}</b> {n_text}", _style("AiNum", fontSize=9, fontName="Helvetica", textColor=DARK, leading=13, leftIndent=8)))
+                if not is_num:
+                    story.append(Paragraph(line_str, body_style))
     else:
         story.append(Paragraph("AI-generated business analysis not available for this run.", body_style))
 
-    # Build PDF with custom NumberedCanvas
     doc.build(story, canvasmaker=NumberedCanvas)
     if in_memory:
         target_dest.seek(0)

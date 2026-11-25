@@ -25,7 +25,6 @@ from sqlalchemy.exc import ArgumentError, NoSuchModuleError, SQLAlchemyError
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-# Load local environment configuration if .env exists
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
@@ -46,7 +45,6 @@ def get_database_url() -> str:
         from sqlalchemy.engine import make_url
 
         parsed = make_url(database_url)
-        # Ensure psycopg driver is used for modern PostgreSQL connections
         if parsed.drivername.lower() in {"postgres", "postgresql"}:
             parsed = parsed.set(drivername="postgresql+psycopg")
         if parsed.drivername.startswith("postgresql") and not parsed.query.get("sslmode"):
@@ -173,19 +171,24 @@ def get_database_status() -> Dict[str, Any]:
 
 
 def initialize_database() -> None:
-    
-    Base.metadata.create_all(bind=engine)
-
-    
-    if not _test_database:
+    import time
+    for attempt in range(3):
         try:
-            from sqlalchemy import text
-            with engine.connect() as conn:
-                conn.execute(text("ALTER TABLE runs ADD COLUMN IF NOT EXISTS user_id VARCHAR(64);"))
-                conn.execute(text("CREATE INDEX IF NOT EXISTS idx_runs_user_id ON runs(user_id);"))
-                conn.commit()
+            Base.metadata.create_all(bind=engine)
+            if not _test_database:
+                try:
+                    from sqlalchemy import text
+                    with engine.connect() as conn:
+                        conn.execute(text("ALTER TABLE runs ADD COLUMN IF NOT EXISTS user_id VARCHAR(64);"))
+                        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_runs_user_id ON runs(user_id);"))
+                        conn.commit()
+                except Exception:
+                    pass
+            break
         except Exception:
-            pass
+            if attempt == 2:
+                raise
+            time.sleep(1)
 
 
 def build_fact_card(
@@ -363,7 +366,6 @@ def get_run(run_id: int, user_id: Optional[str] = None) -> Optional[Dict[str, An
         run = session.get(Run, run_id)
         if not run:
             return None
-        # Enforce strict user isolation: prevent cross-user access
         if user_id is not None and run.user_id and str(run.user_id) != str(user_id):
             return None
         return _run_to_dict(run)
@@ -380,7 +382,6 @@ def delete_run_record(run_id: int, user_id: Optional[str] = None) -> bool:
         if user_id is not None and run.user_id and str(run.user_id) != str(user_id):
             return False
 
-        # Clean up Cloudinary chart images
         for chart in list(run.charts):
             public_id = chart.cloudinary_public_id
             if public_id:
@@ -390,7 +391,6 @@ def delete_run_record(run_id: int, user_id: Optional[str] = None) -> bool:
                 except Exception:
                     pass
 
-        # Clean up Cloudinary private raw assets (models, datasets)
         model_card = run.model_card or {}
         for asset_key in ("model_asset", "dataset_asset", "report_asset"):
             asset = model_card.get(asset_key) or {}

@@ -20,17 +20,14 @@ def swap(old, new, count=1):
     src = src.replace(old, new)
 
 
-# 1) imports
 swap("from services.pdf_report import generate_pdf_report\n",
      "from services.pdf_report import generate_pdf_report\n"
      "from services.loader     import load_any, SUPPORTED_EXTENSIONS\n"
      "from services.profiler   import profile\n"
      "from services.pipeline   import run_analysis\n")
 
-# 2) uploader accepts every supported type
 swap('type=["csv", "xlsx", "xls", "json"],', 'type=[e.lstrip(".") for e in SUPPORTED_EXTENSIONS],')
 
-# 3) preview uses the universal loader
 swap('''            fname = uploaded.name.lower()
             if fname.endswith(".csv"):
                 df_preview = pd.read_csv(uploaded, encoding_errors="replace")
@@ -43,7 +40,6 @@ swap('''            fname = uploaded.name.lower()
             uploaded.seek(0)
 ''')
 
-# 4) smarter target suggestion (with confidence)
 swap('''        temp_insp = inspect_dataset(df_preview, analysis_type=analysis_type)
         auto_t = temp_insp.get("target_column")
 ''', '''        _, _pinfo = profile(df_preview, analysis_type)
@@ -54,7 +50,6 @@ swap('''        temp_insp = inspect_dataset(df_preview, analysis_type=analysis_t
             st.warning(f"Suggested target '{auto_t}' is a low-confidence guess - please confirm it below.")
 ''')
 
-# 5) direct engine -> one call to the shared pipeline
 a = src.index("        # Embedded Direct Engine Execution")
 b_marker = '        progress_bar.progress(100, text="✅ Complete!")\n'
 b = src.index(b_marker, a) + len(b_marker)
@@ -67,12 +62,10 @@ src = src[:a] + '''        # Embedded Direct Engine (same code path as the FastA
         progress_bar.progress(100, text="✅ Complete!")
 ''' + src[b:]
 
-# 6) two new tabs in front of the existing six
 swap("    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([\n",
      "    tab_act, tab_viz, tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([\n"
      '        "🎯 Actions & Predictions",\n        "📈 Interactive Charts",\n')
 
-# 7) tab bodies (inserted right before the empty-state block)
 NEW_TABS = '''
     # ──────────────────────────────────────────────────────────────────────────
     # NEW TAB: ACTIONS & PREDICTIONS
@@ -127,7 +120,7 @@ swap("# ── Empty State ───", NEW_TABS.lstrip("\n") + "# ── Empty S
 swap("Supports CSV, Excel (.xlsx/.xls), and JSON files",
      "Supports CSV, Excel, JSON, JSONL, Parquet, XML, SQLite and PDF tables")
 
-ast.parse(src)  # refuse to write a broken file
+ast.parse(src)
 shutil.copy(PATH, PATH + ".bak")
 open(PATH, "w", encoding="utf-8").write(src)
 print("streamlit_app.py patched. Backup saved as streamlit_app.py.bak")
