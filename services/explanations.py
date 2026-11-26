@@ -53,8 +53,12 @@ def explain_winning_model(
         preprocessor = getattr(pipeline, "named_steps", {}).get("preprocessor", None)
 
         is_tree = is_tree_model(model)
-        n_sample = min(500 if is_tree else 100, len(X))
-        X_sample = X.iloc[:n_sample].copy()
+        max_sample = 500 if is_tree else 200
+        n_sample = min(max_sample, len(X))
+        if len(X) > max_sample:
+            X_sample = X.sample(n=max_sample, random_state=42).copy()
+        else:
+            X_sample = X.copy()
 
         if preprocessor is not None:
             try:
@@ -70,7 +74,14 @@ def explain_winning_model(
         if is_tree:
             explainer = shap.TreeExplainer(model)
         else:
-            explainer = shap.Explainer(model.predict, X_trans[:min(100, len(X_trans))])
+            bg_size = min(100, len(X_trans))
+            if len(X_trans) > bg_size:
+                np.random.seed(42)
+                bg_indices = np.random.choice(len(X_trans), size=bg_size, replace=False)
+                bg = X_trans[bg_indices]
+            else:
+                bg = X_trans
+            explainer = shap.Explainer(model.predict, bg)
 
         shap_vals = explainer(X_trans)
         vals = shap_vals.values if hasattr(shap_vals, "values") else np.asarray(shap_vals)
@@ -85,12 +96,13 @@ def explain_winning_model(
         ]
 
         buf = io.BytesIO()
-        plt.figure(figsize=(9, 6))
+        fig = plt.figure(figsize=(9, 6))
         shap.summary_plot(vals, X_trans, feature_names=feature_names, show=False, max_display=10)
         plt.title("SHAP Feature Importance & Impact Summary", fontsize=12, fontweight="bold", pad=12)
         plt.tight_layout()
-        plt.savefig(buf, format="png", dpi=110, bbox_inches="tight")
-        plt.close()
+        fig.savefig(buf, format="png", dpi=110, bbox_inches="tight")
+        plt.close(fig)
+        plt.close("all")
         buf.seek(0)
         chart_bytes = buf.getvalue()
 

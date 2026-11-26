@@ -3,8 +3,10 @@ FastAPI backend fully decoupled from local disk storage, supporting Supabase Aut
 """
 from __future__ import annotations
 
+import gc
 import io
 import json
+import logging
 import os
 import re
 import sys
@@ -280,6 +282,37 @@ def _build_fact_card(title: str, df: pd.DataFrame, target: Optional[str] = None)
     return build_fact_card(title, numbers=numbers, finding=finding)
 
 
+logger = logging.getLogger("anchoriq.main")
+
+
+def _get_process_mem_mb() -> str:
+    try:
+        import psutil
+        mem_mb = psutil.Process().memory_info().rss / (1024 * 1024)
+        return f" ({mem_mb:.1f} MB)"
+    except Exception:
+        return ""
+
+
+def _log_stage(stage: str, duration: float) -> None:
+    print(f"[analyze] {stage}: {duration:.2f}s{_get_process_mem_mb()}", flush=True)
+
+
+def _upload_chart_with_retry(image_bytes: bytes, session_id: str, title: str, max_retries: int = 3) -> dict:
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            res = upload_chart_png(image_bytes, session_id, title)
+            if res and res.get("uploaded"):
+                return res
+            last_error = res.get("error", "Upload did not succeed") if isinstance(res, dict) else "Upload failed"
+        except Exception as exc:
+            last_error = str(exc)
+        if attempt < max_retries - 1:
+            time.sleep(1.0)
+    return {"uploaded": False, "error": last_error, "secure_url": None, "public_id": None}
+
+
 
 @app.get("/health")
 def health():
@@ -337,91 +370,66 @@ async def analyze(
                 "Dataset has limited business indicators. Analysis will proceed, "
                 "but recommendations and models may be less specific."
             )
-        print(f"[analyze] inspection: {time.perf_counter() - t_stage:.2f}s")
+        _log_stage("inspection", time.perf_counter() - t_stage)
+        gc.collect()
 
         t_stage = time.perf_counter()
         cleaned_df, cleaning_report = auto_clean(df.copy())
-        print(f"[analyze] cleaning: {time.perf_counter() - t_stage:.2f}s")
+        _log_stage("cleaning", time.perf_counter() - t_stage)
+        gc.collect()
 
         t_stage = time.perf_counter()
         model_results = {}
-        sample_warning = None
-
-        analysis_max_rows_val = os.getenv("ANALYSIS_MAX_ROWS", "3000").strip()
-        try:
-            analysis_max_rows = int(analysis_max_rows_val)
-        except (ValueError, TypeError):
-            analysis_max_rows = 3000
-
-        model_df = cleaned_df
-        if len(cleaned_df) > analysis_max_rows:
-            try:
-                if detected_target and detected_target in cleaned_df.columns:
-                    target_series = cleaned_df[detected_target]
-                    val_counts = target_series.value_counts()
-                    if len(val_counts) >= 2 and val_counts.min() >= 2:
-                        from sklearn.model_selection import train_test_split
-                        model_df, _ = train_test_split(
-                            cleaned_df,
-                            train_size=analysis_max_rows,
-                            stratify=target_series,
-                            random_state=42,
-                        )
-                    else:
-                        model_df = cleaned_df.sample(n=analysis_max_rows, random_state=42)
-                else:
-                    model_df = cleaned_df.sample(n=analysis_max_rows, random_state=42)
-            except Exception:
-                model_df = cleaned_df.sample(n=analysis_max_rows, random_state=42)
-            sample_warning = f"Models trained on a sample of {len(model_df)} rows"
+        warnings_list = []
 
         if detected_target and detected_target in cleaned_df.columns:
             try:
                 model_results = auto_model(
-                    model_df,
+                    cleaned_df,
                     target=detected_target,
                     analysis_type=analysis_type,
                     session_id=session_id,
                     save_dir=None,
                 )
-                if sample_warning:
-                    mc = model_results.get("model_card")
-                    if isinstance(mc, dict):
-                        mc.setdefault("warnings", []).insert(0, sample_warning)
-                    if isinstance(model_results.get("leakage_warnings"), list):
-                        model_results["leakage_warnings"].insert(0, sample_warning)
-                    else:
-                        model_results["leakage_warnings"] = [sample_warning]
             except Exception as e:
                 model_results = {"error": str(e)}
+                warnings_list.append(f"Modeling error: {e}")
         else:
             model_results = {"error": "No valid target column identified for predictive modeling."}
-        print(f"[analyze] model: {time.perf_counter() - t_stage:.2f}s")
+            warnings_list.append("No valid target column identified for predictive modeling.")
+
+        if isinstance(model_results.get("model_card", {}).get("warnings"), list):
+            for w in model_results["model_card"]["warnings"]:
+                if w not in warnings_list:
+                    warnings_list.append(w)
+        _log_stage("model", time.perf_counter() - t_stage)
+        gc.collect()
 
         t_stage = time.perf_counter()
         shap_card = None
         shap_chart_bytes = None
         shap_res = {"applicable": False, "reason": "No model trained."}
-        enable_shap = os.getenv("ENABLE_SHAP", "true").strip().lower() not in ("false", "0", "no")
 
-        if enable_shap and model_results.get("best_model") and model_results.get("best_model") != "Baseline":
+        if model_results.get("best_model") and model_results.get("best_model") != "Baseline":
             try:
                 raw_pipe = (model_results.get("bundle") or {}).get("raw_pipeline")
-                feature_cols = [c for c in model_df.columns if c != detected_target]
+                feature_cols = [c for c in cleaned_df.columns if c != detected_target]
                 if raw_pipe is not None:
                     shap_res = explain_winning_model(
                         pipeline=raw_pipe,
-                        X=model_df[feature_cols],
+                        X=cleaned_df[feature_cols],
                         session_id=session_id,
                     )
                     if shap_res.get("applicable"):
                         shap_chart_bytes = shap_res.get("chart_bytes")
                         shap_card = shap_res.get("fact_card")
+                    elif shap_res.get("reason"):
+                        warnings_list.append(f"SHAP explanation: {shap_res['reason']}")
             except Exception as se:
                 shap_res = {"applicable": False, "reason": str(se)}
-        elif not enable_shap:
-            shap_res = {"applicable": False, "reason": "SHAP disabled via configuration."}
-        print(f"[analyze] shap: {time.perf_counter() - t_stage:.2f}s")
+                warnings_list.append(f"SHAP explanation error: {str(se)}")
+        _log_stage("shap", time.perf_counter() - t_stage)
+        gc.collect()
 
         t_stage = time.perf_counter()
         raw_charts = auto_eda(
@@ -430,7 +438,8 @@ async def analyze(
             analysis_type=analysis_type,
             save_dir=None,
         )
-        print(f"[analyze] eda: {time.perf_counter() - t_stage:.2f}s")
+        _log_stage("eda", time.perf_counter() - t_stage)
+        gc.collect()
 
         t_stage = time.perf_counter()
         chart_records = []
@@ -440,22 +449,36 @@ async def analyze(
             title = item.get("title", "EDA Chart")
             b = item.get("bytes")
             if b:
-                uploaded = upload_chart_png(b, session_id, title)
+                uploaded = _upload_chart_with_retry(b, session_id, title)
                 sec_url = uploaded.get("secure_url")
                 chart_ref = sec_url or f"charts/{session_id}/{title.replace(' ', '_').lower()}.png"
                 chart_urls.append(chart_ref)
+                if not sec_url and not (os.getenv("TESTING") or os.getenv("PYTEST_CURRENT_TEST")):
+                    reason = uploaded.get("error", "Failed to upload after 3 retries")
+                    warning_msg = f"{title}: {reason}"
+                    warnings_list.append(warning_msg)
+                    logger.warning(f"Chart upload failed for '{title}': {reason}")
                 chart_records.append({
                     "title": title,
                     "cloudinary_url": sec_url,
                     "cloudinary_public_id": uploaded.get("public_id"),
                     "fact_card": _build_fact_card(title, cleaned_df, target=detected_target),
                 })
+            else:
+                warning_msg = f"{title}: Chart image generation returned empty bytes"
+                warnings_list.append(warning_msg)
+                logger.warning(warning_msg)
 
         if shap_chart_bytes:
-            uploaded_shap = upload_chart_png(shap_chart_bytes, session_id, "SHAP Global Drivers")
+            uploaded_shap = _upload_chart_with_retry(shap_chart_bytes, session_id, "SHAP Global Drivers")
             shap_sec_url = uploaded_shap.get("secure_url")
             shap_ref = shap_sec_url or f"charts/{session_id}/shap_global_drivers.png"
             chart_urls.append(shap_ref)
+            if not shap_sec_url and not (os.getenv("TESTING") or os.getenv("PYTEST_CURRENT_TEST")):
+                reason = uploaded_shap.get("error", "Failed to upload after 3 retries")
+                warning_msg = f"SHAP Global Drivers: {reason}"
+                warnings_list.append(warning_msg)
+                logger.warning(f"SHAP chart upload failed: {reason}")
             chart_records.append({
                 "title": "SHAP Global Drivers",
                 "cloudinary_url": shap_sec_url,
@@ -468,7 +491,7 @@ async def analyze(
             top_card = build_fact_card(
                 "Top Predictive Drivers",
                 numbers=[f"Top: {top_drivers[0]}" if top_drivers else "N/A", f"Total: {len(top_drivers)}"],
-                finding=f"Primary model drivers: {', '.join(top_drivers[:3])}. (SHAP: {shap_res.get('reason', 'library unavailable')}).",
+                finding=f"Primary model drivers: {', '.join(top_drivers[:3])}. (SHAP: {shap_res.get('reason', 'calculation failed')}).",
             )
             chart_records.append({
                 "title": "Top Predictive Drivers",
@@ -476,7 +499,8 @@ async def analyze(
                 "cloudinary_public_id": None,
                 "fact_card": top_card,
             })
-        print(f"[analyze] chart uploads: {time.perf_counter() - t_stage:.2f}s")
+        _log_stage("chart uploads", time.perf_counter() - t_stage)
+        gc.collect()
 
         t_stage = time.perf_counter()
         insights = generate_insights(
@@ -486,7 +510,8 @@ async def analyze(
             analysis_type=analysis_type,
             feature_importance=model_results.get("feature_importance"),
         )
-        print(f"[analyze] insights: {time.perf_counter() - t_stage:.2f}s")
+        _log_stage("insights", time.perf_counter() - t_stage)
+        gc.collect()
 
         t_stage = time.perf_counter()
         bundle_bytes = model_results.get("bundle_bytes")
@@ -498,15 +523,8 @@ async def analyze(
         cleaned_df.to_csv(csv_buf, index=False)
         csv_bytes = csv_buf.getvalue()
         dataset_asset = upload_private_file(csv_bytes, session_id, f"dataset_{session_id}.csv")
-        print(f"[analyze] asset uploads: {time.perf_counter() - t_stage:.2f}s")
-
-        warnings_list = []
-        if sample_warning:
-            warnings_list.append(sample_warning)
-        if isinstance(model_results.get("model_card", {}).get("warnings"), list):
-            for w in model_results["model_card"]["warnings"]:
-                if w not in warnings_list:
-                    warnings_list.append(w)
+        _log_stage("asset uploads", time.perf_counter() - t_stage)
+        gc.collect()
 
         model_card = {
             "session_id": session_id,
@@ -515,6 +533,19 @@ async def analyze(
             "analysis_snapshot": make_analysis_snapshot(model_results, inspection, cleaning_report),
             "dataset_asset": dataset_asset,
             "warnings": warnings_list,
+            "inspection": inspection,
+            "cleaning": cleaning_report,
+            "model_results": (
+                {k: v for k, v in model_results.items() if k not in ("bundle", "bundle_bytes")}
+                if isinstance(model_results, dict)
+                else model_results
+            ),
+            "cv_scores": model_results.get("model_card", {}).get("cv_scores", {}),
+            "chart_paths": chart_urls,
+            "chart_urls": chart_urls,
+            "insights": insights,
+            "notice": notice,
+            "status": "Analysis completed successfully!",
             "dataset_summary": {
                 "rows": int(inspection.get("rows", len(cleaned_df))),
                 "target": detected_target or "not stored",
@@ -523,6 +554,7 @@ async def analyze(
             },
         }
 
+        t_stage = time.perf_counter()
         run_id = save_run_record(
             user_id=user_id,
             filename=file.filename or "dataset.csv",
@@ -533,6 +565,10 @@ async def analyze(
             insights=[{"text": insights, "source": "llm" if os.getenv("GROQ_API_KEY", "").strip() else "rules"}],
             chat_messages=[{"role": "assistant", "content": insights}],
         )
+        _log_stage("saving", time.perf_counter() - t_stage)
+
+        del df, raw_charts
+        gc.collect()
 
         clean_model_results = (
             {k: v for k, v in model_results.items() if k not in ("bundle", "bundle_bytes")}
@@ -551,6 +587,7 @@ async def analyze(
             "chart_urls": chart_urls,
             "model_results": clean_model_results,
             "insights": insights,
+            "warnings": warnings_list,
             "status": "Analysis completed successfully!",
         }
         if notice:

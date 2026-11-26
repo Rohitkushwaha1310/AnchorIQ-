@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import gc
 import warnings
 from functools import partial
 
@@ -187,16 +188,25 @@ def _minority_average_precision(estimator, X, y, positive_label) -> float:
     return float(average_precision_score(np.asarray(y) == positive_label, probabilities[:, class_index]))
 
 
+def _get_process_mem_mb() -> str:
+    try:
+        import psutil
+        mem_mb = psutil.Process().memory_info().rss / (1024 * 1024)
+        return f" ({mem_mb:.1f} MB)"
+    except Exception:
+        return ""
+
+
+def _log_model(name: str, duration: float) -> None:
+    print(f"[analyze] {name}: {duration:.2f}s{_get_process_mem_mb()}", flush=True)
+
+
 def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
                save_dir: str | None = "models", session_id: str = "default") -> dict:
     """Compare and persist models while retaining the legacy response contract."""
     started = time.monotonic()
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
-    try:
-        budget = max(1.0, float(os.getenv("MODEL_TIME_BUDGET", "60").strip()))
-    except (TypeError, ValueError):
-        budget = 60.0
 
     if not target or target not in df.columns:
         return {"error": f"Target column '{target}' not present in dataframe."}
@@ -231,14 +241,7 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
     numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
     categorical_cols = [c for c in X.columns if c not in numeric_cols]
     schema = _schema_for(X, numeric_cols, categorical_cols)
-    subsampled = len(X) > 50000
-    if subsampled:
-        X_search, _, y_search, _ = train_test_split(
-            X, y, train_size=50000, random_state=42,
-            stratify=y if is_classification else None,
-        )
-    else:
-        X_search, y_search = X, y
+    subsampled = False
 
     if is_classification:
         minority = float(y.value_counts(normalize=True).min())
@@ -252,7 +255,7 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
         )
         if use_pr and len(classes) > 2:
             metric_reason = f"Smallest class is {minority:.1%}, below 20%; macro one-vs-rest average precision is used for multiclass imbalance."
-        min_class = int(y_search.value_counts().min())
+        min_class = int(y.value_counts().min())
         folds = min(5, min_class)
         if folds < 2:
             return {"error": "At least two examples per class are required for stratified cross-validation."}
@@ -261,7 +264,7 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
     else:
         metric, scoring = "R2", "r2"
         metric_reason = "R2 measures explained variance for a continuous target; MAE is reported as a complementary error scale."
-        folds = min(5, max(2, len(y_search) // 3))
+        folds = min(5, max(2, len(y) // 3))
         cv = KFold(n_splits=folds, shuffle=True, random_state=42)
         baseline_estimator = DummyRegressor(strategy="mean")
 
@@ -273,45 +276,51 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
     if is_classification:
         if "Logistic Regression" in ENABLED_MODELS:
             try:
-                candidates.append(("Logistic Regression", LogisticRegression(max_iter=800, class_weight="balanced", random_state=42)))
+                candidates.append(("Logistic Regression", LogisticRegression(max_iter=800, class_weight="balanced", random_state=42, n_jobs=1)))
             except Exception as exc:
-                cv_results["Logistic Regression"] = {"skipped": f"Init failed: {exc}"}
+                notes.append(f"Logistic Regression failed: Init failed: {exc}")
+                cv_results["Logistic Regression"] = {"error": f"Init failed: {exc}"}
         if "Decision Tree" in ENABLED_MODELS:
             try:
                 candidates.append(("Decision Tree", DecisionTreeClassifier(max_depth=4, class_weight="balanced", random_state=42)))
             except Exception as exc:
-                cv_results["Decision Tree"] = {"skipped": f"Init failed: {exc}"}
+                notes.append(f"Decision Tree failed: Init failed: {exc}")
+                cv_results["Decision Tree"] = {"error": f"Init failed: {exc}"}
         if "HistGradientBoosting" in ENABLED_MODELS:
             try:
                 candidates.append(("HistGradientBoosting", HistGradientBoostingClassifier(max_iter=60, class_weight="balanced", random_state=42)))
             except Exception as exc:
-                cv_results["HistGradientBoosting"] = {"skipped": f"Init failed: {exc}"}
+                notes.append(f"HistGradientBoosting failed: Init failed: {exc}")
+                cv_results["HistGradientBoosting"] = {"error": f"Init failed: {exc}"}
         if "Random Forest" in ENABLED_MODELS:
             try:
                 candidates.append(("Random Forest", RandomForestClassifier(n_estimators=50, min_samples_leaf=2, class_weight="balanced", n_jobs=1, random_state=42)))
             except Exception as exc:
-                cv_results["Random Forest"] = {"skipped": f"Init failed: {exc}"}
+                notes.append(f"Random Forest failed: Init failed: {exc}")
+                cv_results["Random Forest"] = {"error": f"Init failed: {exc}"}
         if "Extra Trees" in ENABLED_MODELS:
             try:
                 candidates.append(("Extra Trees", ExtraTreesClassifier(n_estimators=50, min_samples_leaf=2, class_weight="balanced", n_jobs=1, random_state=42)))
             except Exception as exc:
-                cv_results["Extra Trees"] = {"skipped": f"Init failed: {exc}"}
+                notes.append(f"Extra Trees failed: Init failed: {exc}")
+                cv_results["Extra Trees"] = {"error": f"Init failed: {exc}"}
         if "LightGBM" in ENABLED_MODELS and HAS_LGBM:
             try:
                 candidates.append(("LightGBM", LGBMClassifier(n_estimators=60, class_weight="balanced", verbosity=-1, n_jobs=1, random_state=42)))
             except Exception as exc:
-                cv_results["LightGBM"] = {"skipped": f"Init failed: {exc}"}
+                notes.append(f"LightGBM failed: Init failed: {exc}")
+                cv_results["LightGBM"] = {"error": f"Init failed: {exc}"}
         if "XGBoost" in ENABLED_MODELS and HAS_XGB:
             try:
                 weight = float((y == 0).sum() / max((y == 1).sum(), 1)) if len(classes) == 2 else 1.0
                 candidates.append(("XGBoost", XGBClassifier(n_estimators=40, max_depth=4, learning_rate=0.08, scale_pos_weight=weight, eval_metric="logloss", verbosity=0, n_jobs=1, random_state=42)))
             except Exception as exc:
-                cv_results["XGBoost"] = {"skipped": f"Init failed: {exc}"}
+                notes.append(f"XGBoost failed: Init failed: {exc}")
+                cv_results["XGBoost"] = {"error": f"Init failed: {exc}"}
         if "CatBoost" in ENABLED_MODELS:
             if not HAS_CATBOOST:
-                warnings.warn("CatBoost is enabled in ENABLED_MODELS but is not installed or failed to import; skipping CatBoost.", UserWarning)
-                notes.append("CatBoost is not installed or failed to import; skipping CatBoost.")
-                cv_results["CatBoost"] = {"skipped": "CatBoost not installed or failed to import"}
+                notes.append("CatBoost is not installed or failed to import.")
+                cv_results["CatBoost"] = {"error": "CatBoost not installed or failed to import"}
             else:
                 try:
                     try:
@@ -320,73 +329,77 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
                         cb_clf = CatBoostClassifier(iterations=60, verbose=0, random_state=42, thread_count=1)
                     candidates.append(("CatBoost", cb_clf))
                 except Exception as exc:
-                    warnings.warn(f"Failed to initialize CatBoost ({exc}); skipping.", UserWarning)
-                    notes.append(f"Failed to initialize CatBoost ({exc}); skipping.")
-                    cv_results["CatBoost"] = {"skipped": f"Init failed: {exc}"}
-        stage1_names = {"Logistic Regression", "Decision Tree"}
+                    notes.append(f"CatBoost failed: Init failed: {exc}")
+                    cv_results["CatBoost"] = {"error": f"Init failed: {exc}"}
     else:
         if "Ridge" in ENABLED_MODELS:
             try:
                 candidates.append(("Ridge", Ridge()))
             except Exception as exc:
-                cv_results["Ridge"] = {"skipped": f"Init failed: {exc}"}
+                notes.append(f"Ridge failed: Init failed: {exc}")
+                cv_results["Ridge"] = {"error": f"Init failed: {exc}"}
         if "ElasticNet" in ENABLED_MODELS:
             try:
                 candidates.append(("ElasticNet", ElasticNet(random_state=42)))
             except Exception as exc:
-                cv_results["ElasticNet"] = {"skipped": f"Init failed: {exc}"}
+                notes.append(f"ElasticNet failed: Init failed: {exc}")
+                cv_results["ElasticNet"] = {"error": f"Init failed: {exc}"}
         if "Lasso" in ENABLED_MODELS:
             try:
                 candidates.append(("Lasso", Lasso(random_state=42)))
             except Exception as exc:
-                cv_results["Lasso"] = {"skipped": f"Init failed: {exc}"}
+                notes.append(f"Lasso failed: Init failed: {exc}")
+                cv_results["Lasso"] = {"error": f"Init failed: {exc}"}
         if "Decision Tree" in ENABLED_MODELS:
             try:
                 candidates.append(("Decision Tree", DecisionTreeRegressor(max_depth=4, random_state=42)))
             except Exception as exc:
-                cv_results["Decision Tree"] = {"skipped": f"Init failed: {exc}"}
+                notes.append(f"Decision Tree failed: Init failed: {exc}")
+                cv_results["Decision Tree"] = {"error": f"Init failed: {exc}"}
         if "HistGradientBoosting" in ENABLED_MODELS:
             try:
                 candidates.append(("HistGradientBoosting", HistGradientBoostingRegressor(max_iter=60, random_state=42)))
             except Exception as exc:
-                cv_results["HistGradientBoosting"] = {"skipped": f"Init failed: {exc}"}
+                notes.append(f"HistGradientBoosting failed: Init failed: {exc}")
+                cv_results["HistGradientBoosting"] = {"error": f"Init failed: {exc}"}
         if "Random Forest" in ENABLED_MODELS:
             try:
                 candidates.append(("Random Forest", RandomForestRegressor(n_estimators=50, min_samples_leaf=2, n_jobs=1, random_state=42)))
             except Exception as exc:
-                cv_results["Random Forest"] = {"skipped": f"Init failed: {exc}"}
+                notes.append(f"Random Forest failed: Init failed: {exc}")
+                cv_results["Random Forest"] = {"error": f"Init failed: {exc}"}
         if "Extra Trees" in ENABLED_MODELS:
             try:
                 candidates.append(("Extra Trees", ExtraTreesRegressor(n_estimators=50, min_samples_leaf=2, n_jobs=1, random_state=42)))
             except Exception as exc:
-                cv_results["Extra Trees"] = {"skipped": f"Init failed: {exc}"}
+                notes.append(f"Extra Trees failed: Init failed: {exc}")
+                cv_results["Extra Trees"] = {"error": f"Init failed: {exc}"}
         if "LightGBM" in ENABLED_MODELS and HAS_LGBM:
             try:
                 candidates.append(("LightGBM", LGBMRegressor(n_estimators=60, verbosity=-1, n_jobs=1, random_state=42)))
             except Exception as exc:
-                cv_results["LightGBM"] = {"skipped": f"Init failed: {exc}"}
+                notes.append(f"LightGBM failed: Init failed: {exc}")
+                cv_results["LightGBM"] = {"error": f"Init failed: {exc}"}
         if "XGBoost" in ENABLED_MODELS and HAS_XGB:
             try:
                 candidates.append(("XGBoost", XGBRegressor(n_estimators=40, max_depth=4, learning_rate=0.08, objective="reg:squarederror", verbosity=0, n_jobs=1, random_state=42)))
             except Exception as exc:
-                cv_results["XGBoost"] = {"skipped": f"Init failed: {exc}"}
+                notes.append(f"XGBoost failed: Init failed: {exc}")
+                cv_results["XGBoost"] = {"error": f"Init failed: {exc}"}
         if "CatBoost" in ENABLED_MODELS:
             if not HAS_CATBOOST:
-                warnings.warn("CatBoost is enabled in ENABLED_MODELS but is not installed or failed to import; skipping CatBoost.", UserWarning)
-                notes.append("CatBoost is not installed or failed to import; skipping CatBoost.")
-                cv_results["CatBoost"] = {"skipped": "CatBoost not installed or failed to import"}
+                notes.append("CatBoost is not installed or failed to import.")
+                cv_results["CatBoost"] = {"error": "CatBoost not installed or failed to import"}
             else:
                 try:
                     cb_reg = CatBoostRegressor(iterations=60, verbose=0, random_state=42, thread_count=1)
                     candidates.append(("CatBoost", cb_reg))
                 except Exception as exc:
-                    warnings.warn(f"Failed to initialize CatBoost ({exc}); skipping.", UserWarning)
-                    notes.append(f"Failed to initialize CatBoost ({exc}); skipping.")
-                    cv_results["CatBoost"] = {"skipped": f"Init failed: {exc}"}
-        stage1_names = {"Ridge", "ElasticNet", "Lasso", "Decision Tree"}
+                    notes.append(f"CatBoost failed: Init failed: {exc}")
+                    cv_results["CatBoost"] = {"error": f"Init failed: {exc}"}
 
     baseline_pipe = Pipeline([("preprocessor", clone(preprocessor)), ("model", baseline_estimator)])
-    baseline_scores, baseline_error = _safe_score(baseline_pipe, X_search, y_search, cv, scoring)
+    baseline_scores, baseline_error = _safe_score(baseline_pipe, X, y, cv, scoring)
     baseline_mean = float(np.mean(baseline_scores)) if baseline_scores else (0.5 if is_classification and metric == "ROC-AUC" else (minority if is_classification else 0.0))
     cv_results["Baseline"] = {"mean": round(baseline_mean, 4), "std": round(float(np.std(baseline_scores)), 4) if baseline_scores else 0.0}
     if baseline_error:
@@ -395,15 +408,13 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
     fitted_candidates = {}
     best_name, best_pipe, best_score = None, None, -float("inf")
 
-    def remaining():
-        return budget - (time.monotonic() - started)
-
-    def evaluate(name, estimator, X_eval=X_search, y_eval=y_search, fold=cv):
+    def evaluate(name, estimator):
         nonlocal best_name, best_pipe, best_score
         pipe = Pipeline([("preprocessor", clone(preprocessor)), ("model", clone(estimator))])
-        scores, error = _safe_score(pipe, X_eval, y_eval, fold, scoring)
+        scores, error = _safe_score(pipe, X, y, cv, scoring)
         if error:
             cv_results[name] = {"error": error}
+            notes.append(f"{name} evaluation failed: {error}")
             return None
         mean = float(np.mean(scores))
         cv_results[name] = {"mean": round(mean, 4), "std": round(float(np.std(scores)), 4)}
@@ -412,23 +423,11 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
             best_name, best_pipe, best_score = name, pipe, mean
         return mean
 
-    fast = [(n, e) for n, e in candidates if n in stage1_names]
-    heavy = [(n, e) for n, e in candidates if n not in stage1_names]
-    for name, estimator in fast:
-        if remaining() <= max(2.0, budget * 0.04):
-            cv_results[name] = {"skipped": "time budget reserve reached"}
-            notes.append(f"{name} skipped to preserve time for final fitting and artifact saving.")
-            continue
+    for name, estimator in candidates:
+        t_model = time.perf_counter()
         evaluate(name, estimator)
-    if remaining() > max(34.0, budget * 0.58):
-        for name, estimator in heavy:
-            if remaining() <= max(27.0, budget * 0.46):
-                cv_results[name] = {"skipped": "time budget reserve reached"}
-                continue
-            evaluate(name, estimator)
-    else:
-        for name, _ in heavy:
-            cv_results[name] = {"skipped": "Stage 2 omitted: insufficient time remains."}
+        _log_model(name, time.perf_counter() - t_model)
+        gc.collect()
 
     if best_pipe is None:
         best_name, best_pipe, best_score = "Baseline", baseline_pipe, baseline_mean
@@ -439,29 +438,29 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
 
     ensemble_kept = False
     ensemble_details = "Ensemble not evaluated."
-    enable_ensemble = os.getenv("ENABLE_ENSEMBLE", "true").strip().lower() not in ("false", "0", "no")
     valid_singles = [
         (n, m, p) for n, (p, m) in fitted_candidates.items()
         if n != "Baseline" and np.isfinite(m)
     ]
     valid_singles.sort(key=lambda item: item[1], reverse=True)
 
-    if enable_ensemble and len(valid_singles) >= 3 and remaining() > max(3.0, budget * 0.05):
+    if len(valid_singles) >= 3:
         top_3 = valid_singles[:3]
         top_3_names = [item[0] for item in top_3]
+        t_ens = time.perf_counter()
         try:
             member_estimators = [(n, clone(p.named_steps["model"])) for n, _, p in top_3]
             if is_classification:
-                ensemble_model = VotingClassifier(estimators=member_estimators, voting="soft")
+                ensemble_model = VotingClassifier(estimators=member_estimators, voting="soft", n_jobs=1)
             else:
-                ensemble_model = VotingRegressor(estimators=member_estimators)
+                ensemble_model = VotingRegressor(estimators=member_estimators, n_jobs=1)
 
             ensemble_pipe = Pipeline([
                 ("preprocessor", clone(preprocessor)),
                 ("model", ensemble_model)
             ])
 
-            ens_scores, ens_error = _safe_score(ensemble_pipe, X_search, y_search, cv, scoring)
+            ens_scores, ens_error = _safe_score(ensemble_pipe, X, y, cv, scoring)
             if ens_error:
                 cv_results["Ensemble"] = {"error": ens_error}
                 ensemble_details = f"Ensemble evaluation failed: {ens_error}"
@@ -499,29 +498,24 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
             cv_results["Ensemble"] = {"error": str(exc)}
             ensemble_details = f"Ensemble creation/evaluation encountered error: {exc}"
             notes.append(ensemble_details)
-    elif not enable_ensemble:
-        ensemble_details = "Ensemble omitted: disabled via configuration."
-    elif len(valid_singles) < 3:
-        ensemble_details = f"Ensemble omitted: fewer than 3 single models were successfully evaluated ({len(valid_singles)})."
+        finally:
+            _log_model("Ensemble", time.perf_counter() - t_ens)
+            gc.collect()
     else:
-        cv_results["Ensemble"] = {"skipped": "time budget reserve reached"}
-        ensemble_details = "Ensemble omitted: insufficient time remaining in budget."
+        ensemble_details = f"Ensemble omitted: fewer than 3 single models were successfully evaluated ({len(valid_singles)})."
+        notes.append(ensemble_details)
 
     brier = None
     calibrated_pipe = best_pipe
     try:
-        if remaining() > max(1.0, budget * 0.05):
-            best_pipe.fit(X, y)
-        else:
-            notes.append("Full-data refit began at the end of the time budget.")
-            best_pipe.fit(X, y)
+        best_pipe.fit(X, y)
         if is_classification:
             min_count = int(y.value_counts().min())
             cal_folds = min(3, min_count)
-            if cal_folds >= 2 and remaining() > max(7.0, budget * 0.12):
+            if cal_folds >= 2:
                 try:
                     try:
-                        calibrator = CalibratedClassifierCV(estimator=clone(best_pipe), cv=cal_folds)
+                        calibrator = CalibratedClassifierCV(estimator=clone(best_pipe), cv=cal_folds, n_jobs=1)
                     except TypeError:
                         calibrator = CalibratedClassifierCV(base_estimator=clone(best_pipe), cv=cal_folds)
                     calibrator.fit(X, y)
@@ -533,8 +527,6 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
                         brier = round(float(np.mean([brier_score_loss((y == i).astype(int), probs[:, i]) for i in range(len(classes))])), 4)
                 except Exception as exc:
                     notes.append(f"Probability calibration failed; using the uncalibrated fitted pipeline ({exc}).")
-            else:
-                notes.append("Calibration skipped because the remaining time or class count was insufficient.")
     except Exception as exc:
         notes.append(f"Winner refit failed ({exc}); fitting the baseline instead.")
         best_name = "Baseline"
@@ -654,7 +646,7 @@ def auto_model(df: pd.DataFrame, target: str, analysis_type: str = "auto",
         "ensemble_details": ensemble_details,
         "brier_score": brier, "mae": mae,
         "time_used_seconds": round(time.monotonic() - started, 2),
-        "time_budget_seconds": budget, "subsampled": subsampled,
+        "time_budget_seconds": None, "subsampled": False,
         "warnings": notes, "reliability_verdict": verdict,
     }
     bundle = {

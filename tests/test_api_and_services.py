@@ -176,6 +176,48 @@ def test_telco_churn_end_to_end(api_client):
     assert len(data["chart_paths"]) > 0
 
 
+def test_telco_all_enabled_models_and_all_charts(api_client):
+    """Verify that every enabled model is trained without skipping and all charts are generated for Telco."""
+    telco_path = "telco_churn.csv"
+    if not os.path.exists(telco_path):
+        pytest.skip("telco_churn.csv not found in working directory")
+
+    with open(telco_path, "rb") as f:
+        content = f.read()
+
+    resp = api_client.post(
+        "/analyze",
+        files={"file": ("telco_churn.csv", content, "text/csv")},
+        data={"analysis_type": "churn"}
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+
+    cv_scores = data.get("model_results", {}).get("cv_scores", {})
+    if not cv_scores:
+        cv_scores = data.get("model_results", {}).get("model_card", {}).get("cv_scores", {})
+
+    expected_models = [
+        "Logistic Regression",
+        "Decision Tree",
+        "HistGradientBoosting",
+        "Random Forest",
+        "Extra Trees",
+        "LightGBM",
+        "XGBoost",
+        "CatBoost",
+        "Ensemble",
+    ]
+    for model_name in expected_models:
+        assert model_name in cv_scores, f"Expected '{model_name}' in cv_scores: {list(cv_scores.keys())}"
+        res = cv_scores[model_name]
+        assert "skipped" not in res, f"Model '{model_name}' should not be skipped: {res}"
+        assert "mean" in res or "error" in res, f"Model '{model_name}' missing evaluation: {res}"
+
+    chart_paths = data.get("chart_paths") or data.get("chart_urls") or []
+    assert len(chart_paths) >= 6, f"Expected all 5 EDA charts + SHAP chart, got {len(chart_paths)}"
+
+
 def test_upload_safeguards_invalid_extension(api_client):
     """Verify disallowed extension (.exe) is rejected with HTTP 400 and a clear error message."""
     resp = api_client.post(

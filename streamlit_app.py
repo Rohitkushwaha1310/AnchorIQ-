@@ -487,6 +487,12 @@ if "result" in st.session_state:
 
     st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
 
+    run_warnings = res.get("warnings") or mc.get("warnings") or []
+    if run_warnings:
+        with st.expander("⚠️ Analysis & Chart Warnings", expanded=False):
+            for w in run_warnings:
+                st.warning(str(w))
+
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
         "EDA Visualizations",
         "Model Benchmark",

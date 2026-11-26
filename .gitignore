@@ -27,3 +27,4 @@ models/
 test_persistence.sqlite
 anchoriq_local.db
 *.db
+catboost_info/

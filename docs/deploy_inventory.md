@@ -51,7 +51,6 @@ This inventory audits all local disk dependencies, endpoint access requirements,
 | `GROQ_API_KEY` | Optional | Backend | Groq Cloud API Key (*console.groq.com*). If blank, system falls back to rule-based insights. |
 | `GROQ_MODEL` | Optional | Backend | Model identifier on Groq (default: `openai/gpt-oss-120b`). |
 | `MAX_UPLOAD_SIZE_MB` | Optional | Backend | Maximum allowed uploaded file size in MB (default: `20`). |
-| `MODEL_TIME_BUDGET` | Optional | Backend | Maximum modeling exploration budget in seconds (default: `60`). |
 | `CORS_ORIGINS` | Optional | Backend | Comma-separated allowed UI origins for CORS (default: `http://localhost:8501`). |
 | `API_URL` | **Required** | Frontend | Base URL of deployed FastAPI backend (default: `http://localhost:8000`). |
 | `TESTING` / `PYTEST_CURRENT_TEST` | Optional (Auto) | Backend / Tests | Bypasses remote calls and uses in-memory SQLite during automated test execution. |
